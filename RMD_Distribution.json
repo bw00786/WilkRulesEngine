@@ -1,0 +1,174 @@
+    [
+        {
+            "name": "Active Participant RMD Initial Calculation",
+            "context": "rmd_distribution",
+            "priority": 8,
+            "description": "Calculate initial RMD for active participant turning 73 in 2025",
+            "conditions": {
+                "and": [
+                    {"current_year": {"operator": "==", "value": 2025}},
+                    {"attains_age_73": {"operator": "==", "value": "Y"}},
+                    {"participant_status": {"operator": "==", "value": "Active"}},
+                    {"is_5_percent_owner": {"operator": "==", "value": false}},
+                    {"year_end_balance": {"operator": ">=", "value": 100000}}
+                ]
+            },
+            "actions": [
+                {
+                    "type": "calculate_rmd",
+                    "parameters": {
+                        "rmd_type": "initial_rmd_73_2025",
+                        "life_expectancy_factor": 26.5,
+                        "distribution_method": "annual",
+                        "distribution_amount": 26500
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Active Participant Monthly RMD Distribution",
+            "context": "rmd_distribution",
+            "priority": 7,
+            "description": "Establish monthly RMD distribution for active participant",
+            "conditions": {
+                "and": [
+                    {"current_year": {"operator": "==", "value": 2025}},
+                    {"attains_age_73": {"operator": "==", "value": "Y"}},
+                    {"participant_status": {"operator": "==", "value": "Active"}},
+                    {"is_5_percent_owner": {"operator": "==", "value": false}},
+                    {"year_end_balance": {"operator": ">=", "value": 100000}}
+                ]
+            },
+            "actions": [
+                {
+                    "type": "establish_monthly_distribution",
+                    "parameters": {
+                        "start_date": "2025-06-15",
+                        "end_date": "2025-12-15",
+                        "monthly_amount": 4416.67,
+                        "distribution_days": [15]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Ongoing Annual RMD Recalculation",
+            "context": "rmd_distribution",
+            "priority": 6,
+            "description": "Recalculate RMD on January 1st each year",
+            "conditions": {
+                "and": [
+                    {"current_year": {"operator": ">", "value": 2025}},
+                    {"participant_status": {"operator": "==", "value": "Active"}},
+                    {"is_5_percent_owner": {"operator": "==", "value": false}}
+                ]
+            },
+            "actions": [
+                {
+                    "type": "recalculate_annual_rmd",
+                    "parameters": {
+                        "life_expectancy_factor": 25.5,
+                        "distribution_method": "monthly"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Spouse Beneficiary RMD (Single Life Expectancy)",
+            "context": "rmd_distribution",
+            "priority": 8,
+            "description": "RMD calculation for spouse beneficiary using single life expectancy",
+            "conditions": {
+                "and": [
+                    {"current_year": {"operator": "==", "value": 2025}},
+                    {"participant_status": {"operator": "==", "value": "Deceased"}},
+                    {"death_date": {"operator": "==", "value": "2025-02-01"}},
+                    {"beneficiary_type": {"operator": "==", "value": "Spouse"}},
+                    {"marital_age_difference": {"operator": "<=", "value": 10}}
+                ]
+            },
+            "actions": [
+                {
+                    "type": "calculate_beneficiary_rmd",
+                    "parameters": {
+                        "rmd_type": "single_life_expectancy",
+                        "life_expectancy_factor": 16.4,
+                        "distribution_amount": 16400
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Spouse Beneficiary RMD (Uniform Life Expectancy)",
+            "context": "rmd_distribution",
+            "priority": 7,
+            "description": "RMD calculation for spouse beneficiary using uniform life expectancy",
+            "conditions": {
+                "and": [
+                    {"current_year": {"operator": "==", "value": 2025}},
+                    {"participant_status": {"operator": "==", "value": "Deceased"}},
+                    {"death_date": {"operator": "==", "value": "2025-02-01"}},
+                    {"beneficiary_type": {"operator": "==", "value": "Spouse"}},
+                    {"marital_age_difference": {"operator": "<=", "value": 10}}
+                ]
+            },
+            "actions": [
+                {
+                    "type": "calculate_beneficiary_rmd",
+                    "parameters": {
+                        "rmd_type": "uniform_life_expectancy",
+                        "life_expectancy_factor": 26.5,
+                        "distribution_amount": 26500
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Beneficiary Monthly RMD Distribution Option 1",
+            "context": "rmd_distribution",
+            "priority": 6,
+            "description": "Monthly RMD distribution for beneficiary (lower amount)",
+            "conditions": {
+                "and": [
+                    {"current_year": {"operator": "==", "value": 2025}},
+                    {"participant_status": {"operator": "==", "value": "Beneficiary"}},
+                    {"beneficiary_type": {"operator": "==", "value": "Spouse"}}
+                ]
+            },
+            "actions": [
+                {
+                    "type": "establish_monthly_distribution",
+                    "parameters": {
+                        "start_date": "2025-06-15",
+                        "end_date": "2025-12-15",
+                        "monthly_amount": 2733.34,
+                        "distribution_days": [15]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Beneficiary Monthly RMD Distribution Option 2",
+            "context": "rmd_distribution",
+            "priority": 5,
+            "description": "Monthly RMD distribution for beneficiary (higher amount)",
+            "conditions": {
+                "and": [
+                    {"current_year": {"operator": "==", "value": 2025}},
+                    {"participant_status": {"operator": "==", "value": "Beneficiary"}},
+                    {"beneficiary_type": {"operator": "==", "value": "Spouse"}}
+                ]
+            },
+            "actions": [
+                {
+                    "type": "establish_monthly_distribution",
+                    "parameters": {
+                        "start_date": "2025-06-15",
+                        "end_date": "2025-12-15",
+                        "monthly_amount": 4416.67,
+                        "distribution_days": [15]
+                    }
+                }
+            ]
+        }
+  ]

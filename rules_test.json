@@ -1,0 +1,304 @@
+[
+    {
+        "id": 6001,
+        "context": "Retirement Planning",
+        "name": "Participant Not Deceased",
+        "priority": 10,
+        "description": "Verifies that participant is not deceased",
+        "conditions": {
+            "participant_status": {
+                "operator": "!=",
+                "value": "Deceased"
+            }
+        },
+        "actions": []
+    },
+    {
+        "id": 6002,
+        "context": "Beneficiary Planning",
+        "name": "Participant Deceased",
+        "priority": 10,
+        "description": "Verifies that participant is deceased",
+        "conditions": {
+            "participant_status": {
+                "operator": "==",
+                "value": "Deceased"
+            }
+        },
+        "actions": []
+    },
+    {
+        "id": 7002,
+        "context": "Retirement Planning",
+        "name": "401K Plan Type",
+        "priority": 9,
+        "description": "Identifies 401K plan types",
+        "conditions": {
+            "plan_type": {
+                "operator": "==",
+                "value": "401K"
+            }
+        },
+        "actions": []
+    },
+    {
+        "id": 7003,
+        "context": "Retirement Planning",
+        "name": "73 Initial RMD for 2025",
+        "priority": 8,
+        "description": "Identifies participants turning 73 in 2025 requiring initial RMD",
+        "conditions": {
+            "and": [
+                { "attains_age_73_in_2025": { "operator": "==", "value": "Y" } },
+                { "current_year": { "operator": "==", "value": 2025 } }
+            ]
+        },
+        "actions": []
+    },
+    {
+        "id": 7005,
+        "context": "Retirement Planning",
+        "name": "Active Participant",
+        "priority": 7,
+        "description": "Identifies active participants",
+        "conditions": {
+            "participant_status": {
+                "operator": "==",
+                "value": "Active"
+            }
+        },
+        "actions": []
+    },
+    {
+        "id": 7006,
+        "context": "Retirement Planning",
+        "name": "Spouse Not More Than 10 Years Younger",
+        "priority": 7,
+        "description": "Identifies married participants with spouse not more than 10 years younger",
+        "conditions": {
+            "marital_status": {
+                "operator": "==",
+                "value": "Spouse is not more than 10 years younger"
+            }
+        },
+        "actions": []
+    },
+    {
+        "id": 7008,
+        "context": "Retirement Planning",
+        "name": "Not 5% Owner",
+        "priority": 7,
+        "description": "Participant is not a 5% owner",
+        "conditions": {
+            "5%_owner": {
+                "operator": "==",
+                "value": "No"
+            }
+        },
+        "actions": []
+    },
+    {
+        "id": 9008,
+        "context": "Retirement Planning",
+        "name": "RMD Calculation - Annual",
+        "priority": 5,
+        "description": "Calculates annual RMD amount using Uniform Life Table",
+        "conditions": {
+            "and": [
+                { "refRule": "Participant Not Deceased" },
+                { "refRule": "401K Plan Type" },
+                { "refRule": "Active Participant" },
+                { "refRule": "73 Initial RMD for 2025" }
+            ]
+        },
+        "actions": [
+            {
+                "type": "calculate_rmd_amount",
+                "target": "system",
+                "parameters": {
+                    "calculation_type": "annual",
+                    "prior_year_end_balance": {"use_fact": "prior_year_end_balance"},
+                    "life_expectancy_factor": 26.5
+                }
+            }
+        ]
+    },
+    {
+        "id": 9009,
+        "context": "Retirement Planning",
+        "name": "Monthly RMD Schedule - Limited Period",
+        "priority": 4,
+        "description": "Establishes monthly RMD schedule for 2025 with specific end date",
+        "conditions": {
+            "and": [
+                { "distribution_schedule": { "operator": "==", "value": "monthly" } },
+                { "distribution_start_date": { "operator": "==", "value": "2025-06-15" } },
+                { "distribution_end_date": { "operator": "==", "value": "2025-12-15" } }
+            ]
+        },
+        "actions": [
+            {
+                "type": "schedule_distribution",
+                "target": "system",
+                "parameters": {
+                    "frequency": "monthly",
+                    "day_of_month": 15,
+                    "start_date": "2025-06-15",
+                    "end_date": "2025-12-15",
+                    "amount": 4416.67
+                }
+            }
+        ]
+    },
+    {
+        "id": 9010,
+        "context": "Retirement Planning",
+        "name": "Monthly RMD Schedule - Ongoing",
+        "priority": 4,
+        "description": "Establishes ongoing monthly RMD schedule",
+        "conditions": {
+            "and": [
+                { "distribution_schedule": { "operator": "==", "value": "monthly" } },
+                { "distribution_start_date": { "operator": "==", "value": "2025-06-15" } },
+                { "distribution_end_type": { "operator": "==", "value": "ongoing" } }
+            ]
+        },
+        "actions": [
+            {
+                "type": "schedule_distribution",
+                "target": "system",
+                "parameters": {
+                    "frequency": "monthly",
+                    "day_of_month": 15,
+                    "start_date": "2025-06-15",
+                    "end_type": "until_canceled",
+                    "amount_calculation": "recalculate_annually"
+                }
+            }
+        ]
+    },
+    {
+        "id": 9016,
+        "context": "Beneficiary Planning",
+        "name": "Spouse Beneficiary Options",
+        "priority": 8,
+        "description": "Base rule for spouse beneficiary scenarios",
+        "conditions": {
+            "and": [
+                { "refRule": "Participant Deceased" },
+                { "refRule": "401K Plan Type" },
+                { "refRule": "Spouse Not More Than 10 Years Younger" },
+                { "refRule": "Not 5% Owner" }
+            ]
+        },
+        "actions": []
+    },
+    {
+        "id": 9017,
+        "context": "Beneficiary Planning",
+        "name": "Beneficiary RMD - Single Life",
+        "priority": 7,
+        "description": "Calculates RMD using single life expectancy for spouse beneficiary",
+        "conditions": {
+            "beneficiary_option": {
+                "operator": "==",
+                "value": "1"
+            }
+        },
+        "actions": [
+            {
+                "type": "calculate_rmd_amount",
+                "target": "system",
+                "parameters": {
+                    "calculation_type": "single_life",
+                    "prior_year_end_balance": 100000,
+                    "life_expectancy_factor": 16.4,
+                    "rmd_amount": 16400
+                }
+            }
+        ]
+    },
+    {
+        "id": 9018,
+        "context": "Beneficiary Planning",
+        "name": "Beneficiary RMD - Uniform Life",
+        "priority": 7,
+        "description": "Calculates RMD using uniform life table for spouse beneficiary",
+        "conditions": {
+            "beneficiary_option": {
+                "operator": "==",
+                "value": "2"
+            }
+        },
+        "actions": [
+            {
+                "type": "calculate_rmd_amount",
+                "target": "system",
+                "parameters": {
+                    "calculation_type": "uniform_life",
+                    "prior_year_end_balance": 100000,
+                    "life_expectancy_factor": 26.5,
+                    "rmd_amount": 26500
+                }
+            }
+        ]
+    },
+    {
+        "id": 9019,
+        "context": "Beneficiary Planning",
+        "name": "Beneficiary Monthly Distribution",
+        "priority": 6,
+        "description": "Schedules monthly distributions for beneficiaries",
+        "conditions": {
+            "distribution_schedule": {
+                "operator": "==",
+                "value": "monthly"
+            }
+        },
+        "actions": [
+            {
+                "type": "schedule_distribution",
+                "target": "system",
+                "parameters": {
+                    "frequency": "monthly",
+                    "day_of_month": 15,
+                    "start_date": "2025-06-15",
+                    "end_date": "2025-12-15",
+                    "amount": {
+                        "use_function": "conditional_amount",
+                        "parameters": {
+                            "option1": 2733.34,
+                            "option2": 4416.67
+                        }
+                    }
+                }
+            }
+        ]
+    },
+    {
+        "id": 9020,
+        "context": "Retirement Planning",
+        "name": "Annual Recalculation",
+        "priority": 3,
+        "description": "Recalculates RMD annually based on new balance",
+        "conditions": {
+            "and": [
+                { "current_month": { "operator": "==", "value": 1 } },
+                { "current_day": { "operator": "==", "value": 1 } }
+            ]
+        },
+        "actions": [
+            {
+                "type": "recalculate_rmd",
+                "target": "system",
+                "parameters": {
+                    "calculation_type": "annual_recalculation",
+                    "life_expectancy_factor": {
+                        "use_function": "get_updated_factor",
+                        "parameters": {"age_increment": 1}
+                    }
+                }
+            }
+        ]
+    }
+]

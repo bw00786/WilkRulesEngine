@@ -1,0 +1,231 @@
+[
+    {
+        "id": 1001,
+        "context": "Mortgage Application",
+        "name": "Employment Verification",
+        "priority": 10,
+        "description": "Verify stable employment history",
+        "conditions": {
+            "or": [
+                { "employment_status": { "operator": "==", "value": "Full-Time" } },
+                { "employment_status": { "operator": "==", "value": "Self-Employed" } },
+                { "employment_status": { "operator": "==", "value": "Retired" } }
+            ]
+        },
+        "actions": [
+            {
+                "type": "add_approval_factor",
+                "target": "application",
+                "parameters": {
+                    "factor": "Employment Verified"
+                }
+            }
+        ]
+    },
+    {
+        "id": 1002,
+        "context": "Mortgage Application",
+        "name": "Minimum Credit Score",
+        "priority": 9,
+        "description": "Check applicant meets minimum credit requirements",
+        "conditions": {
+            "credit_score": {
+                "operator": ">=",
+                "value": 620
+            }
+        },
+        "actions": [
+            {
+                "type": "add_approval_factor",
+                "target": "application",
+                "parameters": {
+                    "factor": "Credit Score Requirement Met"
+                }
+            }
+        ]
+    },
+    {
+        "id": 1003,
+        "context": "Mortgage Application",
+        "name": "Maximum Debt-to-Income Ratio",
+        "priority": 8,
+        "description": "Ensure DTI ratio is within acceptable limits",
+        "conditions": {
+            "dti_ratio": {
+                "operator": "<=",
+                "value": 43
+            }
+        },
+        "actions": [
+            {
+                "type": "add_approval_factor",
+                "target": "application",
+                "parameters": {
+                    "factor": "DTI Ratio Acceptable"
+                }
+            }
+        ]
+    },
+    {
+        "id": 1004,
+        "context": "Mortgage Application",
+        "name": "Down Payment Requirement",
+        "priority": 7,
+        "description": "Verify minimum down payment percentage",
+        "conditions": {
+            "down_payment_percent": {
+                "operator": ">=",
+                "value": 3.5
+            }
+        },
+        "actions": [
+            {
+                "type": "add_approval_factor",
+                "target": "application",
+                "parameters": {
+                    "factor": "Minimum Down Payment Met"
+                }
+            }
+        ]
+    },
+    {
+        "id": 1005,
+        "context": "Mortgage Application",
+        "name": "Loan-to-Value Ratio Check",
+        "priority": 6,
+        "description": "Calculate and validate LTV ratio",
+        "conditions": {
+            "ltv_ratio": {
+                "operator": "<=",
+                "value": 97
+            }
+        },
+        "actions": [
+            {
+                "type": "add_approval_factor",
+                "target": "application",
+                "parameters": {
+                    "factor": "LTV Ratio Acceptable"
+                }
+            }
+        ]
+    },
+    {
+        "id": 1006,
+        "context": "Mortgage Application",
+        "name": "Property Type Validation",
+        "priority": 5,
+        "description": "Check property is eligible type",
+        "conditions": {
+            "property_type": {
+                "operator": "in",
+                "value": ["Single-Family", "Condo", "Townhouse", "Multi-Unit"]
+            }
+        },
+        "actions": [
+            {
+                "type": "add_approval_factor",
+                "target": "application",
+                "parameters": {
+                    "factor": "Eligible Property Type"
+                }
+            }
+        ]
+    },
+    {
+        "id": 1007,
+        "context": "Mortgage Application",
+        "name": "Full Approval Check",
+        "priority": 1,
+        "description": "Final approval decision",
+        "conditions": {
+            "and": [
+                { "refRule": "Employment Verification" },
+                { "refRule": "Minimum Credit Score" },
+                { "refRule": "Maximum Debt-to-Income Ratio" },
+                { "refRule": "Down Payment Requirement" },
+                { "refRule": "Loan-to-Value Ratio Check" },
+                { "refRule": "Property Type Validation" }
+            ]
+        },
+        "actions": [
+            {
+                "type": "set_application_status",
+                "target": "application",
+                "parameters": {
+                    "status": "Approved",
+                    "message": "Meets all requirements"
+                }
+            }
+        ]
+    },
+    {
+        "id": 2001,
+        "context": "Mortgage Application",
+        "name": "PMI Requirement",
+        "priority": 4,
+        "description": "Determine if PMI is required",
+        "conditions": {
+            "down_payment_percent": {
+                "operator": "<",
+                "value": 20
+            }
+        },
+        "actions": [
+            {
+                "type": "add_loan_term",
+                "target": "application",
+                "parameters": {
+                    "term": "PMI Required",
+                    "details": "Private Mortgage Insurance added"
+                }
+            }
+        ]
+    },
+    {
+        "id": 2002,
+        "context": "Mortgage Application",
+        "name": "Interest Rate Adjustment",
+        "priority": 3,
+        "description": "Adjust rates based on credit score",
+        "conditions": {
+            "credit_score": {
+                "operator": "<",
+                "value": 700
+            }
+        },
+        "actions": [
+            {
+                "type": "adjust_interest_rate",
+                "target": "application",
+                "parameters": {
+                    "adjustment": "+0.25%",
+                    "reason": "Credit Score Adjustment"
+                }
+            }
+        ]
+    },
+    {
+        "id": 2003,
+        "context": "Mortgage Application",
+        "name": "First-Time Homebuyer Exception",
+        "priority": 2,
+        "description": "Special terms for first-time buyers",
+        "conditions": {
+            "and": [
+                { "first_time_homebuyer": { "operator": "==", "value": true } },
+                { "credit_score": { "operator": ">=", "value": 640 } }
+            ]
+        },
+        "actions": [
+            {
+                "type": "add_special_term",
+                "target": "application",
+                "parameters": {
+                    "term": "Reduced Down Payment",
+                    "details": "3.5% down payment accepted"
+                }
+            }
+        ]
+    }
+]

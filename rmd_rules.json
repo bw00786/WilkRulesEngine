@@ -1,0 +1,417 @@
+[
+    {  
+      "id": 3571,
+      "context": "Retirement Planning",
+      "name": "Participant Not Deceased",
+      "priority": 10,
+      "description": "articipant Not Deceased",
+      "conditions": {
+        "participant_status": {
+          "operator": "!=",
+          "value": "Deceased"
+        }
+      },
+      "actions": []
+    },
+    {
+      "id": 3572,
+      "context": "Retirement Planning",
+      "name": "IRA Plan Type",
+      "priority": 9,
+      "description": "IRS Plan types",
+      "conditions": {
+        "or": [
+          { "plan_type": { "operator": "==", "value": "IRA" } },
+          { "plan_type": { "operator": "==", "value": "SEP IRA" } },
+          { "plan_type": { "operator": "==", "value": "Simple IRA" } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "IRA_Plan_Type"}}]
+    },
+    {
+      "id": 3573,
+      "context": "Retirement Planning",
+      "name": "70.5 Initial RMD",
+      "priority": 8,
+      "description": "this is a 70.5 initial RMDs",
+      "conditions": {
+        "and": [
+          { "dob": { "operator": "<", "value": "1949-07-01" } },
+          { "participant_age": { "operator": "==", "value": 70.5 } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "set_to_70.5"}}]
+    },
+    {
+      "id": 3574,
+      "context": "Retirement Planning",
+      "name": "72 Initial RMD",
+      "priority": 8,
+      "description": "72 Initial RMD",
+      "conditions": {
+        "and": [
+          { "dob": { "operator": ">=", "value": "1949-07-01" } },
+          { "dob": { "operator": "<=", "value": "1950-12-31" } },
+          { "participant_age": { "operator": "==", "value": 72 } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "set_to_72_initialRMD"}}]
+    },
+    {
+      "id": 3575,
+      "context": "Retirement Planning",
+      "name": "73 Initial RMD",
+      "description": "73 Initial RMD",
+      "priority": 8,
+      "conditions": {
+        "and": [
+          { "dob": { "operator": ">=", "value": "1950-01-01" } },
+          { "dob": { "operator": "<=", "value": "1959-12-31" } },
+          { "participant_age": { "operator": "==", "value": 73 } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "setTo_73_RMD"}}]
+    },
+      {
+      "id": 3576,
+      "context": "Retirement Planning",
+      "name": "75 Initial RMD",
+      "priority": 8,
+      "description": "75 Initial RMD",
+      "conditions": {
+        "and": [
+          { "dob": { "operator": ">=", "value": "1960-01-01" } },
+          { "participant_age": { "operator": "==", "value": 75 } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "set_to_75"}}]
+    },
+    {
+      "id": 3577,
+      "context": "Retirement Planning",
+      "name": "70.5 Sub RMD",
+      "priority": 7,
+      "description": "72 Initial RMD",
+      "conditions": {
+        "and": [
+          { "dob": { "operator": "<", "value": "1949-07-01" } },
+          { "participant_age": { "operator": ">", "value": 70.5 } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "Set_to_70.5"}}]
+    },
+    {
+      "id": 3578,
+      "context": "Retirement Planning",
+      "name": "72 Sub RMD",
+      "priority": 7,
+      "description": "72 Sub RMD",
+      "conditions": {
+        "and": [
+          { "dob": { "operator": ">=", "value": "1949-07-01" } },
+          { "dob": { "operator": "<=", "value": "1950-12-31" } },
+          { "participant_age": { "operator": ">", "value": 72 } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "Set_to_72_Sub_RMD"}}]
+    },
+    {
+      "id": 3579,
+      "context": "Retirement Planning",
+      "name": "73 Sub RMD",
+      "description": "73 Sub RMD",
+      "priority": 7,
+      "conditions": {
+        "and": [
+          { "dob": { "operator": ">=", "value": "1950-01-01" } },
+          { "dob": { "operator": "<=", "value": "1959-12-31" } },
+          { "participant_age": { "operator": ">", "value": 73 } }
+        ]
+      },
+      "actions": []
+    },
+    {
+      "id": 35710,
+      "context": "Retirement Planning",
+      "name": "75 Sub RMD",
+      "priority": 7,
+      "description": "75 Sub RMD",
+      "conditions": {
+        "and": [
+          { "dob": { "operator": ">=", "value": "1960-01-01" } },
+          { "participant_age": { "operator": ">", "value": 75 } }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "Set_to_75_SubRMD"}}]
+    },
+      {
+      "id": 35711,
+      "context": "Retirement Planning",
+      "name": "RMD Due 0401",
+      "priority": 6,
+      "description": "RMD Due 0401",
+      "conditions": {
+        "and": [
+          { "refRule": "Participant Not Deceased"},
+          { "refRule": "IRA Plan Type"},
+          { "or": [
+              {"refRule": "70.5 Initial RMD"},
+              {"refRule": "72 Initial RMD"},
+              {"refRule": "73 Initial RMD"},
+              {"refRule": "75 Initial RMD"}
+            ]
+          }
+        ]
+      },
+      "actions": [ {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "Set_To_0401_RMD"}}]
+    },
+    {
+      "id": 35712,
+      "context": "Retirement Planning",
+      "name": "RMD Due 1231",
+      "priority": 6,
+      "description": "RMD Due 1231",
+      "conditions": {
+        "and": [
+          { "refRule": "Participant Not Deceased"},
+          { "refRule": "IRA Plan Type"},
+          { "or": [
+              {"refRule": "70.5 Sub RMD"},
+              {"refRule": "72 Sub RMD"},
+              {"refRule": "73 Sub RMD"},
+              {"refRule": "75 Sub RMD"}
+            ]
+          }
+        ]
+      },
+      "actions": []
+    },
+    {
+      "id": 35713,
+      "context": "Retirement Planning",
+      "name": "Single UL",
+      "priority": 5,
+      "description": "Single UL",
+      "conditions": {
+        "and": [
+          { "or": [
+              {"refRule": "RMD Due 0401"},
+              {"refRule": "RMD Due 1231"}
+            ]
+          },
+          { "marital_status": { "operator": "!=", "value": "Married" } }
+        ]
+      },
+      "actions": [
+          {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "SingleUL"}}
+      ]
+    },
+    {
+      "id": 35714,
+      "context": "Retirement Planning",
+      "name": "Married Sole Beneficiary UL",
+      "priority": 5,
+      "description": "Married Sole Beneficiary UL",
+      "conditions": {
+        "and": [
+          { "or": [
+              {"refRule": "RMD Due 0401"},
+              {"refRule": "RMD Due 1231"}
+            ]
+          },
+          { "marital_status": { "operator": "==", "value": "Married" } },
+          { "beneficiary": { "operator": "==", "value": "Spouse" } },
+          { "beneficiary_allocation": { "operator": "==", "value": 100 } },
+          { "beneficiary_age_plus_10": { "operator": ">=", "value": {"use_fact": "participant_age"}} }
+        ]
+      },
+      "actions": [
+           {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "MarriedSoleBeneUL"}}
+      ]
+    },
+      {
+      "id": 35715,
+      "context": "Retirement Planning",
+      "name": "Married Multi Beneficiary UL",
+      "priority": 5,
+      "description": "Married Multi Beneficiary UL",
+      "conditions": {
+        "and": [
+          { "or": [
+              {"refRule": "RMD Due 0401"},
+              {"refRule": "RMD Due 1231"}
+            ]
+          },
+          { "marital_status": { "operator": "==", "value": "Married" } },
+          { "beneficiary": { "operator": "==", "value": "Spouse" } },
+        { "beneficiary_allocation": { "operator": "!=", "value": 100 } }
+      ]
+    },
+    "actions": [
+         {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "MarriedMultiBeneUL"}}
+    ]
+  },
+  {
+    "id": 35716,
+    "context": "Retirement Planning",
+    "name": "Married Joint Life",
+    "priority": 5,
+    "description": "Married Joint Life",
+    "conditions": {
+      "and": [
+        { "or": [
+            {"refRule": "RMD Due 0401"},
+            {"refRule": "RMD Due 1231"}
+          ]
+        },
+        { "marital_status": { "operator": "==", "value": "Married" } },
+        { "beneficiary": { "operator": "==", "value": "Spouse" } },
+        { "beneficiary_allocation": { "operator": "==", "value": 100 } },
+        { "beneficiary_age_plus_10": { "operator": "<", "value": {"use_fact": "participant_age"}} }
+      ]
+    },
+    "actions": [
+         {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "MarriedJL"}}
+    ]
+  },
+  {
+    "id": 35717,
+    "context": "Retirement Planning",
+    "name": "RMD Calculation Single UL",
+    "priority": 4,
+    "description": "RMD Calculation Single UL",
+    "conditions": {
+        "refRule": "Single UL"
+    },
+    "actions": [
+        {
+            "type": "calculate_rmd_amount",
+            "target": "system",
+            "parameters": {
+                "calculation_type": "single_ul",
+                "prior_year_end_balance": {"use_fact": "prior_year_end_balance"},
+                "life_expectancy_factor": {"use_function": "get_life_expectancy_factor", "parameters": {"participant_age": {"use_fact": "participant_age"}}}
+            }
+        }
+    ]
+  },
+  {
+    "id": 35718,
+    "context": "Retirement Planning",
+    "name": "RMD Calculation Married Joint Life",
+    "priority": 4,
+    "description": "RMD Calculation Married Joint Life",
+    "conditions": {
+        "refRule": "MarriedJL"
+    },
+    "actions": [
+        {
+            "type": "calculate_rmd_amount",
+            "target": "system",
+            "parameters": {
+                "calculation_type": "married_jl",
+                "prior_year_end_balance": {"use_fact": "prior_year_end_balance"},
+                "life_expectancy_factor": {"use_function": "get_joint_life_expectancy_factor", "parameters": {"participant_age": {"use_fact": "participant_age"}, "spouse_age": {"use_function": "get_spouse_age", "parameters":{}} }}
+            }
+        }
+    ]
+  }
+]
+
+Sample Input Facts:
+
+JSON
+
+        { "beneficiary": { "operator": "==", "value": "Spouse" } },
+        { "beneficiary_allocation": { "operator": "!=", "value": 100 } }
+      ]
+    },
+    "actions": [
+         {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "MarriedMultiBeneUL"}}
+    ]
+  },
+  {
+    "name": "Married Joint Life",
+    "priority": 5,
+    "conditions": {
+      "and": [
+        { "or": [
+            {"refRule": "RMD Due 0401"},
+            {"refRule": "RMD Due 1231"}
+          ]
+        },
+        { "marital_status": { "operator": "==", "value": "Married" } },
+        { "beneficiary": { "operator": "==", "value": "Spouse" } },
+        { "beneficiary_allocation": { "operator": "==", "value": 100 } },
+        { "beneficiary_age_plus_10": { "operator": "<", "value": {"use_fact": "participant_age"}} }
+      ]
+    },
+    "actions": [
+         {"type": "calculate_rmd", "target": "system", "parameters": {"rmd_type": "MarriedJL"}}
+    ]
+  },
+  {
+    "name": "RMD Calculation Single UL",
+    "priority": 4,
+    "conditions": {
+        "refRule": "Single UL"
+    },
+    "actions": [
+        {
+            "type": "calculate_rmd_amount",
+            "target": "system",
+            "parameters": {
+                "calculation_type": "single_ul",
+                "prior_year_end_balance": {"use_fact": "prior_year_end_balance"},
+                "life_expectancy_factor": {"use_function": "get_life_expectancy_factor", "parameters": {"participant_age": {"use_fact": "participant_age"}}}
+            }
+        }
+    ]
+  },
+  {
+    "name": "RMD Calculation Married Joint Life",
+    "priority": 4,
+    "conditions": {
+        "refRule": "MarriedJL"
+    },
+    "actions": [
+        {
+            "type": "calculate_rmd_amount",
+            "target": "system",
+            "parameters": {
+                "calculation_type": "married_jl",
+                "prior_year_end_balance": {"use_fact": "prior_year_end_balance"},
+                "life_expectancy_factor": {"use_function": "get_joint_life_expectancy_factor", "parameters": {"participant_age": {"use_fact": "participant_age"}, "spouse_age": {"use_function": "get_spouse_age", "parameters":{}} }}
+            }
+        }
+    ]
+  }
+]
+Key Points:
+
+refRule: This is a new feature that allows rules to reference the result of other rules. This reduces redundancy and makes the rules easier to understand.
+
+Date Formatting: The dob values are now in "YYYY-MM-DD" format for better clarity.
+
+Actions with Parameters: The actions section now includes parameters, such as rmd_type, calculation_type, prior_year_end_balance, and life_expectancy_factor.
+use_fact and use_function: These are used to pull data from the provided facts or call external functions.
+
+Functions: I added place holders for functions like get_life_expectancy_factor, get_joint_life_expectancy_factor, and get_spouse_age. You will need to implement these functions.
+
+Rule Chaining: The rules are chained together using refRule. The output of previous rules determines which subsequent rules are evaluated.
+Priorities: Each rule is assigned a priority, ensuring that rules are evaluated in the correct order.
+
+
+{
+    "participant_status": "Active",
+    "plan_type": "IRA",
+    "dob": "1948-06-30",
+    "participant_age": 71,
+    "marital_status": "Married",
+    "beneficiary": "Spouse",
+    "beneficiary_allocation": 100,
+    "beneficiary_age_plus_10": 70,
+    "prior_year_end_balance": 1000000
+  }
+
+

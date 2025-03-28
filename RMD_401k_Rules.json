@@ -1,0 +1,369 @@
+[
+    {
+      "id": 6001,
+      "context": "401K_Rules",
+      "name": "Participant Not Deceased",
+      "priority": 10,
+      "description": "Verifies that participant is not deceased",
+      "conditions"    : {
+        "participant_status": {
+          "operator": "!=",
+          "value": "Deceased"
+        }
+      },
+      "actions": []
+    },
+    {
+      "id": 7002,
+      "context": "401K_Rules",
+      "name": "401K Plan Type",
+      "priority": 9,
+      "description": "Identifies 401K plan types",
+      "conditions": {
+        "plan_type": {
+          "operator": "==", 
+          "value": "401K"
+        }
+      },
+      "actions": [
+        {
+          "type": "calculate_rmd", 
+          "target": "system", 
+          "parameters": {
+            "rmd_type": "401K_Plan_Type"
+          }
+        }
+      ]
+    },
+    {
+      "id": 7003,
+      "context": "401K_Rules",
+      "name": "73 Initial RMD for 2025",
+      "priority": 8,
+      "description": "Identifies participants turning 73 in 2025 requiring initial RMD",
+      "conditions": {
+        "and": [
+          { "attains_age_73_in_2025": { "operator": "==", "value": "Y" } },
+          { "current_year": { "operator": "==", "value": 2025 } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "calculate_rmd", 
+          "target": "system", 
+          "parameters": {
+            "rmd_type": "initial_rmd_73_2025"
+          }
+        }
+      ]
+    },
+    {
+      "id": 7004,
+      "context": "401K_Rules",
+      "name": "Subsequent Annual RMD",
+      "priority": 8,
+      "description": "Identifies participants requiring subsequent RMDs after initial year",
+      "conditions": {
+        "and": [
+          { "attains_age_73_in_2025": { "operator": "==", "value": "Y" } },
+          { "current_year": { "operator": ">", "value": 2025 } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "calculate_rmd", 
+          "target": "system", 
+          "parameters": {
+            "rmd_type": "subsequent_annual_rmd"
+          }
+        }
+      ]
+    },
+    {
+      "id": 7005,
+      "context": "401K_Rules",
+      "name": "Active Participant",
+      "priority": 7,
+      "description": "Identifies active participants",
+      "conditions": {
+        "participant_status": {
+          "operator": "==",
+          "value": "Active"
+        }
+      },
+      "actions": []
+    },
+    {
+      "id": 7006,
+      "context": "401K_Rules",
+      "name": "Spouse Not More Than 10 Years Younger",
+      "priority": 7,
+      "description": "Identifies married participants with spouse not more than 10 years younger",
+      "conditions": {
+        "marital_status": {
+          "operator": "==",
+          "value": "Spouse is not more than 10 years younger"
+        }
+      },
+      "actions": []
+    },
+    {
+      "id": 7007,
+      "context": "401K_Rules",
+      "name": "Apply Uniform Life Table",
+      "priority": 6,
+      "description": "Applies Uniform Life Table factors based on participant age",
+      "conditions": {
+        "and": [
+          { "refRule": "Participant Not Deceased" },
+          { "refRule": "401K Plan Type" },
+          { "refRule": "Active Participant" },
+          { 
+            "or": [
+              { "refRule": "73 Initial RMD for 2025" },
+              { "refRule": "Subsequent Annual RMD" }
+            ]
+          }
+        ]
+      },
+      "actions": [
+        {
+          "type": "calculate_rmd", 
+          "target": "system", 
+          "parameters": {
+            "rmd_type": "apply_uniform_life_table"
+          }
+        }
+      ]
+    },
+    {
+      "id": 9008,
+      "context": "401K_Rules",
+      "name": "RMD Calculation - Annual",
+      "priority": 5,
+      "description": "Calculates annual RMD amount",
+      "conditions": {
+        "refRule": "Apply Uniform Life Table"
+      },
+      "actions": [
+        {
+          "type": "calculate_rmd_amount",
+          "target": "system",
+          "parameters": {
+            "calculation_type": "annual",
+            "prior_year_end_balance": {"use_fact": "prior_year_end_balance"},
+            "life_expectancy_factor": {"use_function": "get_life_expectancy_factor", "parameters": {"participant_age": {"use_fact": "participant_age"}}}
+          }
+        }
+      ]
+    },
+    {
+      "id": 9009,
+      "context": "401K_Rules",
+      "name": "Monthly RMD Schedule - Limited Period",
+      "priority": 4,
+      "description": "Establishes monthly RMD schedule for 2025 with specific end date",
+      "conditions": {
+        "and": [
+          { "refRule": "RMD Calculation - Annual" },
+          { "distribution_schedule": { "operator": "==", "value": "monthly" } },
+          { "distribution_start_date": { "operator": ">=", "value": "2025-01-01" } },
+          { "distribution_end_date": { "operator": "<=", "value": "2025-12-31" } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "schedule_distribution",
+          "target": "system",
+          "parameters": {
+            "frequency": "monthly",
+            "day_of_month": {"use_fact": "distribution_day"},
+            "start_date": {"use_fact": "distribution_start_date"},
+            "end_date": {"use_fact": "distribution_end_date"},
+            "amount": {"use_function": "divide", "parameters": {"dividend": {"use_fact": "annual_rmd_amount"}, "divisor": {"use_function": "count_distributions", "parameters": {"start_date": {"use_fact": "distribution_start_date"}, "end_date": {"use_fact": "distribution_end_date"}, "frequency": "monthly"}}}}
+          }
+        }
+      ]
+    },
+    {
+      "id": 9010,
+      "context": "401K_Rules",
+      "name": "Monthly RMD Schedule - Ongoing",
+      "priority": 4,
+      "description": "Establishes ongoing monthly RMD schedule",
+      "conditions": {
+        "and": [
+          { "refRule": "RMD Calculation - Annual" },
+          { "distribution_schedule": { "operator": "==", "value": "monthly" } },
+          { "distribution_start_date": { "operator": ">=", "value": "2025-01-01" } },
+          { "distribution_end_type": { "operator": "==", "value": "ongoing" } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "schedule_distribution",
+          "target": "system",
+          "parameters": {
+            "frequency": "monthly",
+            "day_of_month": {"use_fact": "distribution_day"},
+            "start_date": {"use_fact": "distribution_start_date"},
+            "end_type": "until_canceled",
+            "amount_calculation": "recalculate_annually",
+            "amount": {"use_function": "divide", "parameters": {"dividend": {"use_fact": "annual_rmd_amount"}, "divisor": {"use_function": "remaining_months_in_year", "parameters": {"start_date": {"use_fact": "distribution_start_date"}}}}}
+          }
+        }
+      ]
+    },
+    {
+      "id": 9011,
+      "context": "401K_Rules",
+      "name": "Annual RMD Recalculation",
+      "priority": 3,
+      "description": "Recalculates RMD annually based on new year-end balance and updated life expectancy factor",
+      "conditions": {
+        "and": [
+          { "refRule": "Participant Not Deceased" },
+          { "refRule": "401K Plan Type" },
+          { "refRule": "Active Participant" },
+          { "current_year": { "operator": ">", "value": 2025 } },
+          { "current_month": { "operator": "==", "value": 1 } },
+          { "current_day": { "operator": "==", "value": 1 } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "recalculate_rmd",
+          "target": "system",
+          "parameters": {
+            "calculation_type": "annual",
+            "prior_year_end_balance": {"use_fact": "prior_year_end_balance"},
+            "life_expectancy_factor": {"use_function": "get_updated_life_expectancy_factor", "parameters": {"participant_age": {"use_fact": "participant_age"}}}
+          }
+        }
+      ]
+    },
+    {
+      "id": 9012,
+      "context": "401K_Rules",
+      "name": "Use Case 1 - Annual RMD Calculation",
+      "priority": 2,
+      "description": "Specific implementation for Use Case 1 - annual RMD projection",
+      "conditions": {
+        "and": [
+          { "refRule": "Participant Not Deceased" },
+          { "refRule": "401K Plan Type" },
+          { "refRule": "73 Initial RMD for 2025" },
+          { "refRule": "Active Participant" },
+          { "refRule": "Spouse Not More Than 10 Years Younger" },
+          { "current_year": { "operator": "==", "value": 2025 } },
+          { "current_month": { "operator": "==", "value": 1 } },
+          { "current_day": { "operator": "==", "value": 1 } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "calculate_rmd_amount",
+          "target": "system",
+          "parameters": {
+            "calculation_type": "annual_projection",
+            "prior_year_end_balance": 100000,
+            "life_expectancy_factor": 26.5,
+            "rmd_amount": 3773.58
+          }
+        }
+      ]
+    },
+    {
+      "id": 9013,
+      "context": "401K_Rules",
+      "name": "Use Case 2 - Limited Period Monthly Distribution",
+      "priority": 2,
+      "description": "Specific implementation for Use Case 2 - monthly distribution with end date",
+      "conditions": {
+        "and": [
+          { "refRule": "Participant Not Deceased" },
+          { "refRule": "401K Plan Type" },
+          { "refRule": "73 Initial RMD for 2025" },
+          { "refRule": "Active Participant" },
+          { "refRule": "Spouse Not More Than 10 Years Younger" },
+          { "distribution_schedule": { "operator": "==", "value": "monthly" } },
+          { "distribution_start_date": { "operator": "==", "value": "2025-06-15" } },
+          { "distribution_end_date": { "operator": "==", "value": "2025-12-15" } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "schedule_distribution",
+          "target": "system",
+          "parameters": {
+            "frequency": "monthly",
+            "day_of_month": 15,
+            "start_date": "2025-06-15",
+            "end_date": "2025-12-15",
+            "total_periods": 7,
+            "monthly_amount": 539.08
+          }
+        }
+      ]
+    },
+    {
+      "id": 9014,
+      "context": "401K_Rules",
+      "name": "Use Case 3 - Ongoing Monthly Distribution",
+      "priority": 2,
+      "description": "Specific implementation for Use Case 3 - ongoing monthly distribution",
+      "conditions": {
+        "and": [
+          { "refRule": "Participant Not Deceased" },
+          { "refRule": "401K Plan Type" },
+          { "refRule": "73 Initial RMD for 2025" },
+          { "refRule": "Active Participant" },
+          { "refRule": "Spouse Not More Than 10 Years Younger" },
+          { "distribution_schedule": { "operator": "==", "value": "monthly" } },
+          { "distribution_start_date": { "operator": "==", "value": "2025-06-15" } },
+          { "distribution_end_type": { "operator": "==", "value": "ongoing" } }
+        ]
+      },
+      "actions": [
+        {
+          "type": "schedule_distribution",
+          "target": "system",
+          "parameters": {
+            "frequency": "monthly",
+            "day_of_month": 15,
+            "start_date": "2025-06-15",
+            "end_type": "until_canceled",
+            "amount_calculation": "recalculate_annually",
+            "first_year_monthly_amount": 539.08,
+            "first_year_total_amount": 3773.58
+          }
+        }
+      ]
+    },
+    {
+      "id": 9015,
+      "context": "401K_Rules",
+      "name": "Life Expectancy Factors Table",
+      "priority": 1,
+      "description": "Provides life expectancy factors by age according to IRS Uniform Lifetime Table",
+      "conditions": {},
+      "actions": [
+        {
+          "type": "define_life_expectancy_table",
+          "target": "system",
+          "parameters": {
+            "table": {
+              "73": 26.5,
+              "74": 25.5,
+              "75": 24.6,
+              "76": 23.7,
+              "77": 22.9,
+              "78": 22.0,
+              "79": 21.1,
+              "80": 20.2
+            }
+          }
+        }
+      ]
+    }
+  ]

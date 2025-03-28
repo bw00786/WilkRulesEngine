@@ -1,0 +1,24 @@
+[
+    {
+        "id": 2346789,
+        "context": "retirement_planning",
+        "name": "73 Initial RMD",
+        "priority": 5,
+        "description": "Rule for Required Minimum Distribution at age 73",
+        "conditions": {
+            "and": [
+                {"age": {"operator": ">=", "value": 73}},
+                {"participant_status": {"operator": "==", "value": "Active"}}
+            ]
+        },
+        "actions": [
+            {
+                "type": "add_fact",
+                "parameters": {
+                    "key": "rmd_eligible",
+                    "value": true
+                }
+            }
+        ]
+    }
+]
