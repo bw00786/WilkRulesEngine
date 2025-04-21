@@ -11,9 +11,14 @@ from sqlalchemy import (
     Integer, 
     String, 
     JSON, 
+    DateTime,
     UniqueConstraint,
     func  # Add this to the existing imports
 )
+import uuid
+from uuid import UUID as PyUUID  # Import Python's UUID type
+from sqlalchemy.dialects.postgresql import UUID  # Correct import for PostgreSQL
+from datetime import datetime
 import asyncio
 import asyncpg
 import logging
@@ -36,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, JSON, select, UniqueConstraint
+from sqlalchemy import Column, Integer, String, JSON, select, UniqueConstraint, Float
 from pydantic import BaseModel, ValidationError, validator, Field
 import uvicorn
 from enum import Enum, auto
@@ -56,6 +61,7 @@ logger = logging.getLogger(__name__)
 # --------------------------
 DATABASE_URL = "postgresql+asyncpg://user:password@localhost:5433/rules_db"
 REDIS_URL = "redis://localhost:6379/0"
+#REDIS_URL= "redis://rs-ai-redis.ssnc-corp.cloud/0"
 CACHE_TTL = 300  # 5 minutes
 MAX_POOL_SIZE = int(os.getenv('POOL_SIZE', 20))
 MAX_OVERFLOW = int(os.getenv('MAX_OVERFLOW', 5))
@@ -98,6 +104,298 @@ class RuleEngineCore:
         self.plugins.append(plugin)
         self.conflict_resolvers.extend(plugin.get_conflict_resolvers())
         self.action_validators.extend(plugin.get_action_validators())   
+
+
+# Add these new classes for Rete implementation
+class AlphaNode:
+    """Represents a condition on a single fact attribute"""
+    def __init__(self, condition):
+        self.condition = condition  # {'field': {'operator': value}}
+        self.successors = []
+        
+    def matches(self, facts):
+        try:
+            field = next(iter(self.condition))
+            cond = self.condition[field]
+            
+            # Handle special refRule case
+            if field == 'refRule':
+                return True # Let BetaNodes handle this
+
+            op = cond.get('operator')
+            val = cond.get('value')
+            
+            if not op or not val:
+                return False
+
+            fact_val = facts[field]
+            return self._compare_values(op, fact_val, val)
+        
+        except (KeyError, TypeError) as e:
+            logger.error(f"Invalid condition format: {self.condition}")
+            return False
+
+    def _compare_values(self, op, fact_val, condition_val):
+        # Implementation of comparison logic
+        try:
+            if op == "==": return fact_val == condition_val
+            elif op == "!=": return fact_val != condition_val
+            elif op == ">=": return float(fact_val) >= float(condition_val)
+            elif op == "<=": return float(fact_val) <= float(condition_val)
+            elif op == ">": return float(fact_val) > float(condition_val)
+            elif op == "<": return float(fact_val) < float(condition_val)
+            elif op == "in": return fact_val in condition_val
+            elif op == "not_in": return fact_val not in condition_val
+            return False
+        except (TypeError,  ValueError):
+            return False    
+
+class BetaNode:
+    """Beta node for joining conditions"""
+    def __init__(self, operator):
+        self.operator = operator  # 'and' or 'or'
+        self.successors = []
+        self.conditions = []
+        self.referenced_rules = []  # To store references to other rules
+    def add_reference(self, rule_name):
+        """Add a referenced rule dependency"""
+        self.referenced_rules.append(rule_name)    
+        
+
+class ReteNetwork:
+    """Main Rete network implementation"""
+    def __init__(self):
+        self.alpha_nodes = {}
+        self.beta_nodes = []
+        self.productions = {}
+        self.working_memory = set()
+        self.rule_dependencies = defaultdict(set)  # Track rule dependencies
+
+    def _check_join_conditions(self, beta_node, facts):
+    ##Check if the beta node's join conditions are satisfied by the facts
+        if beta_node.operator == 'and':
+            # For AND nodes, all conditions must be met
+            for condition in beta_node.conditions:
+                if not self._evaluate_condition(condition, facts):
+                    return False
+            return True
+        elif beta_node.operator == 'or':
+           # For OR nodes, at least one condition must be met
+           if not beta_node.conditions:
+              return False
+           for condition in beta_node.conditions:
+               if self._evaluate_condition(condition, facts):
+                  return True
+           return False
+        return False    
+    
+    def _evaluate_condition(self, condition, facts):
+        """Evaluate a single condition against facts"""
+        if isinstance(condition, dict):
+            for field, cond_def in condition.items():
+                # Skip refRule conditions as they're handled separately
+                if field == 'refRule':
+                   continue
+                
+                # Get the value from facts
+                if field not in facts:
+                    return False
+                
+                fact_value = facts[field]
+            
+                # Get operator and expected value
+                operator = cond_def.get('operator')
+                expected_value = cond_def.get('value')
+            
+                # Evaluate based on operator
+                if operator == '==':
+                    if fact_value != expected_value:
+                        return False
+                elif operator == '!=':
+                    if fact_value == expected_value:
+                         return False
+                elif operator == '>':
+                    if not (fact_value > expected_value):
+                       return False
+                elif operator == '>=':
+                    if not (fact_value >= expected_value):
+                        return False
+                elif operator == '<':
+                    if not (fact_value < expected_value):
+                        return False
+                elif operator == '<=':
+                     if not (fact_value <= expected_value):
+                         return False
+            # Add more operators as needed
+    
+        return True
+    
+    def _check_standard_conditions(self, beta_node):
+        """Check standard conditions for a beta node"""
+        # This method should match the logic in _check_beta_conditions
+        # but focusing only on standard (non-refRule) conditions
+        if beta_node.operator == 'and':
+             return all(self._evaluate_condition(cond, self.working_memory) 
+                       for cond in beta_node.conditions)
+        elif beta_node.operator == 'or':
+             return any(self._evaluate_condition(cond, self.working_memory) 
+                    for cond in beta_node.conditions)
+        return False
+
+    def _activate(self, node, facts, activated, agenda):
+        """Propagate activation through the network with agenda"""
+        if node not in activated:
+            activated.add(node)
+            agenda.append(node)
+
+        for successor in node.successors:
+            if isinstance(successor, BetaNode):
+                # Check join conditions for BetaNode
+                if self._check_join_conditions(successor, facts):
+                    self._activate(successor, facts, activated, agenda)
+            else:
+                # Propagate to other nodes
+                self._activate(successor, facts, activated, agenda)   
+               
+
+    
+    def add_rule(self, rule):
+        """Compile rule conditions into Rete nodes"""
+        # Create production node for actions
+        prod_node = ProductionNode(rule)
+        self.productions[rule['name']] = prod_node
+        
+        # Build condition tree
+        self._build_condition_tree(rule['conditions'], prod_node)
+
+    def _build_condition_tree(self, conditions, parent_node):
+        """Recursively build Rete nodes from conditions"""
+        if 'and' in conditions:
+            beta = BetaNode('and')
+            for cond in conditions['and']:
+                self._process_condition(cond, beta)
+            beta.successors.append(parent_node)
+            self.beta_nodes.append(beta)
+        elif 'or' in conditions:
+            beta = BetaNode('or')
+            for cond in conditions['or']:
+                self._process_condition(cond, beta)
+            beta.successors.append(parent_node)
+            self.beta_nodes.append(beta)
+        else:
+            self._process_condition(conditions, parent_node)
+
+    def _process_condition(self, condition, parent_node):
+        """Create alpha nodes for simple conditions or handle nested logic"""
+        if isinstance(condition, dict):
+            # Handle logical operators recursively
+            if 'and' in condition or 'or' in condition:
+                self._build_condition_tree(condition, parent_node)
+                return
+            # Handle rule references
+            if 'refRule' in condition:
+                ref_alpha = AlphaNode({'refRule': condition['refRule']})
+                ref_alpha.successors.append(parent_node)
+                self.alpha_nodes[str(condition)] = ref_alpha
+                # Add to rule dependencies
+                if isinstance(parent_node, ProductionNode):
+                    self.rule_dependencies[parent_node.rule['name']].add(condition['refRule'])
+                elif isinstance(parent_node, BetaNode):
+                     parent_node.referenced_rules.append(condition['refRule'])
+                return
+                # Handle implicit AND for multiple fields
+                if len(condition) > 1:
+                   beta = BetaNode('and')
+                   for field, cond_def in condition.items():
+                      self._process_condition({field: cond_def}, beta)
+                   beta.successors.append(parent_node)
+                   self.beta_nodes.append(beta)
+            else:
+                   for field, cond_def in condition.items():
+                        # Create AlphaNode for each field
+                        alpha_key = f"{field}_{cond_def['operator']}_{cond_def['value']}"
+                        if alpha_key not in self.alpha_nodes:
+                           self.alpha_nodes[alpha_key] = AlphaNode({field: cond_def})
+                        self.alpha_nodes[alpha_key].successors.append(parent_node)
+                        # Add condition to parent node if it's a BetaNode
+                        if isinstance(parent_node, BetaNode):
+                           parent_node.conditions.append({field: cond_def})
+        elif isinstance(condition, list):
+            # Handle implicit AND for lists
+            beta = BetaNode('and')
+            for cond in condition:
+                self._process_condition(cond, beta)
+            beta.successors.append(parent_node)
+            self.beta_nodes.append(beta) 
+
+    def process_facts(self, facts):
+        """Evaluate facts through the Rete network with proper refRule handling"""
+        # Store facts in working memory
+        self.working_memory = facts  
+        activated = set()
+        agenda = deque()
+
+        # Phase 1: Alpha node processing
+        for alpha in self.alpha_nodes.values():
+            if alpha.matches(facts):
+                self._activate(alpha, facts, activated, agenda)
+
+        # Phase 2: Beta node processing with refRule support
+        while agenda:
+            current_node = agenda.popleft()
+
+            if isinstance(current_node, BetaNode):
+                # Handle rule references for beta nodes
+                if self._check_beta_conditions(current_node, activated):
+                    for successor in current_node.successors:
+                        if successor not in activated:
+                            self._activate(successor, facts, activated, agenda)
+                           
+
+            elif isinstance(current_node, ProductionNode):
+                # Add to final results if all dependencies are met
+                if self._check_rule_dependencies(current_node.rule, activated):
+                    activated.add(current_node)
+
+        return [p.rule for p in activated if isinstance(p, ProductionNode)]
+    
+   
+    
+    def _check_beta_conditions(self, beta_node, activated):
+        """Check both regular conditions and rule references"""
+        # Check standard conditions
+        conditions_met = self._check_standard_conditions(beta_node)
+        
+        # Check rule references
+        ref_rules_met = all(
+            any(p.rule['name'] == ref_rule for p in activated 
+                if isinstance(p, ProductionNode))
+            for ref_rule in beta_node.referenced_rules
+        )
+
+        if beta_node.operator == 'and':
+            return conditions_met and ref_rules_met
+        elif beta_node.operator == 'or':
+            return conditions_met or ref_rules_met
+        return False
+
+    def _check_rule_dependencies(self, rule, activated):
+        """Verify all dependencies for a production rule"""
+        return all(
+            any(p.rule['name'] == dep for p in activated 
+                if isinstance(p, ProductionNode))
+            for dep in self.rule_dependencies[rule['name']]
+        )
+
+    
+                
+class ProductionNode:
+    """Represents a rule's actions when conditions are met"""
+    def __init__(self, rule):
+        self.rule = rule
+        ##self.actions = rule['actions']    
+        self.successors = []  # Even though typically production nodes are terminal, 
+                             # adding this for consistency    
 
 # Define Action first
 class Action(BaseModel):
@@ -232,6 +530,241 @@ class RuleDependencyMetadata:
     last_executed: Optional[datetime] = None
     execution_count: int = 0
     failure_count: int = 0
+
+class RuleValidator:
+    """Comprehensive rule validator with semantic and content validation"""
+    
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.logger = logging.getLogger(__name__)
+    
+    async def validate_rule_set(self, rules: List[Dict[str, Any]]) -> Tuple[bool, List[Dict[str, Any]]]:
+        """
+        Validate a complete set of rules including cross-references and cycles
+        
+        Args:
+            rules: List of rule dictionaries
+            
+        Returns:
+            Tuple[bool, List[Dict]]: (is_valid, validation_errors)
+        """
+        if not rules:
+            return False, [{"error": "No rules provided"}]
+            
+        # Validate individual rules first
+        all_errors = []
+        for rule in rules:
+            valid, errors = await self.validate_rule(rule, rules)
+            if not valid:
+                all_errors.extend([{
+                   "row": 0,
+                   "rule_name": rule.get('name', 'Unknown'),
+                   "error_type": "Validation Error",
+                   "error_message": f"{errors['loc']}: {errors['msg']}"
+                }])
+        
+        if all_errors:
+            return False, all_errors
+            
+        # Check for cyclic dependencies
+        try:
+            evaluator = ContextualRuleEvaluator(self.db)
+            context = rules[0].get('context', 'default')
+            await evaluator.prepare_rule_graph(rules, context)
+        except ValueError as e:
+            if "Cyclic dependencies" in str(e):
+                return False, [{"error": f"Dependency cycle detected: {str(e)}"}]
+            raise
+            
+        # All validations passed
+        return True, []
+    
+    async def validate_rule(self, rule: Dict[str, Any], all_rules: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
+        """
+        Validate a single rule semantically
+        
+        Args:
+            rule: Rule dictionary to validate
+            all_rules: All rules for cross-reference validation
+            
+        Returns:
+            Tuple[bool, List[str]]: (is_valid, error_messages)
+        """
+        errors = []
+        
+        # Check basic structure using Pydantic
+        try:
+            rule_obj = RuleCreate(**rule)
+        except ValidationError as e:
+            for err in e.errors():
+                loc = "->".join(str(x) for x in err['loc'])
+                errors.append(f"{loc}: {err['msg']}")
+            return False, errors
+            
+        # Validate condition structure and references
+        condition_errors = self._validate_conditions(rule.get('conditions', {}), all_rules)
+        errors.extend(condition_errors)
+        
+        # Validate actions
+        action_errors = self._validate_actions(rule.get('actions', []))
+        errors.extend(action_errors)
+        
+        # Check for duplicate rule names
+        duplicate = await self._check_duplicate_rule(rule.get('name', ''), rule.get('context', 'default'))
+        if duplicate:
+            errors.append(f"Rule with name '{rule.get('name')}' already exists in context '{rule.get('context')}'")
+        
+        return len(errors) == 0, errors
+    
+    def _validate_conditions(self, conditions: Dict[str, Any], all_rules: List[Dict[str, Any]]) -> List[str]:
+        """Validate condition structure and references"""
+        errors = []
+        
+        # Handle empty conditions
+        if not conditions:
+            return ["Conditions cannot be empty"]
+            
+        # Check for logical operator structure
+        if not any(op in conditions for op in ['and', 'or', 'refRule']):
+            # Single condition check
+            if not self._is_valid_condition_format(conditions):
+                errors.append("Invalid condition format. Expected operators like 'and', 'or', or field conditions.")
+        
+        # Check referenced rules
+        ref_rules = self._extract_referenced_rules(conditions)
+        for ref_rule in ref_rules:
+            if not any(r.get('name') == ref_rule for r in all_rules):
+                errors.append(f"Referenced rule '{ref_rule}' does not exist")
+        
+        # Validate logical structure
+        if 'and' in conditions:
+            if not isinstance(conditions['and'], list) or not conditions['and']:
+                errors.append("'and' operator must have a non-empty list of conditions")
+            else:
+                for subcond in conditions['and']:
+                    errors.extend(self._validate_conditions(subcond, all_rules))
+                    
+        if 'or' in conditions:
+            if not isinstance(conditions['or'], list) or not conditions['or']:
+                errors.append("'or' operator must have a non-empty list of conditions")
+            else:
+                for subcond in conditions['or']:
+                    errors.extend(self._validate_conditions(subcond, all_rules))
+        
+        # Validate date comparisons
+        if 'date_comparison' in conditions:
+            date_comp = conditions['date_comparison']
+            if not all(k in date_comp for k in ['field', 'operator']):
+                errors.append("Date comparison requires 'field' and 'operator'")
+            if date_comp.get('operator') not in ['before', 'after', 'within_years']:
+                errors.append(f"Invalid date comparison operator: {date_comp.get('operator')}")
+        
+        return errors
+    
+    def _is_valid_condition_format(self, condition: Dict[str, Any]) -> bool:
+        """Check if a leaf condition has valid format"""
+        if not isinstance(condition, dict):
+            return False
+            
+        # Each condition should be field -> {operator, value} format
+        for field, details in condition.items():
+            if not isinstance(details, dict):
+                return False
+            if 'operator' not in details or 'value' not in details:
+                return False
+                
+            # Validate operator
+            op = details.get('operator')
+            if op not in ['==', '!=', '>=', '<=', '>', '<', 'in', 'not_in']:
+                return False
+                
+        return True
+        
+    def _extract_referenced_rules(self, conditions: Dict[str, Any]) -> List[str]:
+        """Extract all referenced rule names from conditions"""
+        ref_rules = []
+        
+        if isinstance(conditions, dict):
+            if 'refRule' in conditions:
+                ref_rules.append(conditions['refRule'])
+                
+            for key, value in conditions.items():
+                if isinstance(value, dict):
+                    ref_rules.extend(self._extract_referenced_rules(value))
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            ref_rules.extend(self._extract_referenced_rules(item))
+                            
+        return ref_rules
+    
+    def _validate_actions(self, actions: List[Dict[str, Any]]) -> List[str]:
+        """Validate action structure and required parameters"""
+        errors = []
+        
+        for action in actions:
+            action_type = action.get('type')
+            params = action.get('parameters', {})
+            
+            if not action_type:
+                errors.append("Action missing required 'type' field")
+                continue
+                
+            # Type-specific validation
+            if action_type == 'schedule_distribution':
+                if 'amount' not in params:
+                    errors.append("'schedule_distribution' action requires 'amount' parameter")
+                
+                # Check end_type and end_date are not both specified
+                if 'end_type' in params and 'end_date' in params:
+                    errors.append("Cannot specify both 'end_type' and 'end_date' in schedule_distribution")
+                    
+            elif action_type == 'calculate_rmd':
+                if 'rmd_type' not in params:
+                    errors.append("'calculate_rmd' action requires 'rmd_type' parameter")
+            
+            # Add more action-specific validations here
+            
+        return errors
+        
+    async def _check_duplicate_rule(self, rule_name: str, context: str) -> bool:
+        """Check if a rule with the same name exists in the context"""
+        if not rule_name:
+            return False
+            
+        query = select(RuleModel).where(
+            (func.lower(RuleModel.name) == rule_name.lower()) & 
+            (func.lower(RuleModel.context) == context.lower())
+        )
+        
+        result = await self.db.execute(query)
+        return result.scalar() is not None
+        
+    async def test_evaluate_rule(self, rule: Dict[str, Any], sample_facts: Dict[str, Any]) -> Dict[str, Any]:
+        """Test evaluate a rule against sample facts to verify it works"""
+        try:
+            evaluator = ContextualRuleEvaluator(self.db)
+            
+            # Create a temporary list with just this rule
+            temp_rule_list = [rule]
+            result = await evaluator._evaluate_rule(
+                rule=rule,
+                facts=sample_facts,
+                all_rules=temp_rule_list,
+                cache=EvaluationCache()
+            )
+            
+            return {
+                "can_evaluate": True,
+                "conditions_met": result['conditions_met'],
+                "actions": result.get('actions', []) if result['conditions_met'] else [],
+                "matched_conditions": result.get('matched_conditions', [])
+            }
+        except Exception as e:
+            return {
+                "can_evaluate": False,
+                "error": str(e)
+            }    
 
 class DateUtils:
     @staticmethod
@@ -504,71 +1037,7 @@ class ExcelRuleUploader:
         self.db = db
         self.logger = logging.getLogger(__name__)
 
-    async def validate_excel_structure(self, file_path: str) -> List[Dict[str, Any]]:
-        """
-        Validate Excel file structure and convert to rules
-        
-        Expected Excel Columns:
-        - context(str): Context
-        - name (str): Rule name
-        - priority (int): Rule priority
-        - description (str): Rule description
-        - conditions (json): Conditions in JSON format
-        - actions (json): Actions in JSON format
-        """
-        try:
-            # Read Excel file
-            df = pd.read_excel(file_path)
-            
-            # Required columns
-            required_columns = [
-                'context','name', 'priority', 'description', 
-                'conditions', 'actions'
-            ]
-            
-            # Check if all required columns exist
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                raise ValueError(f"Missing columns: {', '.join(missing_columns)}")
-            
-            # Convert DataFrame to list of dictionaries
-            rules = []
-            for _, row in df.iterrows():
-                try:
-                    # Parse JSON strings for conditions and actions
-                    conditions = json.loads(row['conditions']) if isinstance(row['conditions'], str) else row['conditions']
-                    actions = json.loads(row['actions']) if isinstance(row['actions'], str) else row['actions']
-                    
-                    rule = {
-                        'context': str(row['context']),
-                        'name': str(row['name']),
-                        'priority': int(row['priority']),
-                        'description': str(row['description']),
-                        'conditions': conditions,
-                        'actions': actions
-                    }
-                    
-                    # Validate rule structure
-                    RuleCreate(**rule)
-                    rules.append(rule)
-                
-                except (json.JSONDecodeError, ValidationError) as e:
-                    self.logger.error(f"Invalid rule in row: {row}. Error: {str(e)}")
-                    raise HTTPException(
-                        status_code=400, 
-                        detail=f"Invalid rule structure in row: {str(e)}"
-                    )
-            
-            return rules
-        
-        except Exception as e:
-            self.logger.error(f"Excel file processing error: {str(e)}")
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Excel file processing failed: {str(e)}"
-            )
-        finally:
-            logger.info("removing files")
+    
 
     async def validate_excel_structure(self, file_path: str) -> List[Dict[str, Any]]:
             """
@@ -581,7 +1050,16 @@ class ExcelRuleUploader:
                  - description (str): Rule description
                  - conditions (json): Conditions in JSON format
                  - actions (json): Actions in JSON format
+
             """
+            def parse_value(val):
+                try:
+                   return int(val)
+                except ValueError:
+                     try:
+                        return float(val)
+                     except ValueError:
+                         return val
             try:
                 # Read Excel file
                 df = pd.read_excel(file_path)
@@ -602,7 +1080,7 @@ class ExcelRuleUploader:
                 for _, row in df.iterrows():
                     try:
                        # Parse JSON strings for conditions and actions
-                       conditions = json.loads(row['conditions']) if isinstance(row['conditions'], str) else row['conditions']
+                       conditions = json.loads(row['conditions'], parse_float=parse_value, parse_int=parse_value)
                        actions = json.loads(row['actions']) if isinstance(row['actions'], str) else row['actions']
                     
                        rule = {
@@ -636,9 +1114,10 @@ class ExcelRuleUploader:
             finally:
                          # Clean up temporary file if it exists
                 if os.path.exists(file_path):
-                   os.remove(file_path)
-                if os.path.exists(file_path):
-                   os.remove(file_path)        
+                    try:
+                       os.remove(file_path)
+                    except Exception as e:
+                       logger.warning(f"Error deleting temp file: {str(e)}")      
 
 # --------------------------
 # Pydantic Models
@@ -650,7 +1129,9 @@ class EvaluationCache:
             self.condition_cache = {}
 
         def rule_cache_key(self, rule_name: str, facts: dict) -> str:
-            return f"{rule_name}-{hash(frozenset(sorted(facts.items())))}"
+            # Use more efficient hashing for large fact dictionaries
+            facts_hash = xxhash.xxh64(json.dumps(facts, sort_keys=True)).hexdigest()
+            return f"{rule_name}-{facts_hash}"
 
 class ActionConflictResolver:
     def __init__(self):
@@ -1032,7 +1513,40 @@ class ContextualRuleEvaluator:
                 
         return matched
   
+# Modified ContextualRuleEvaluator using Rete
+class ReteRuleEvaluator(ContextualRuleEvaluator):
+    def __init__(self, db: AsyncSession):
+        super().__init__(db)
+        self.rete_network = ReteNetwork()
+        self.initialized = False
 
+    async def initialize_network(self, rules):
+        """Build Rete network from rules"""
+        for rule in rules:
+            self.rete_network.add_rule(rule)
+        self.initialized = True
+
+    async def evaluate_rules(self, rules: List[Dict], facts: Dict, context: str):
+        """Evaluate using Rete network"""
+        if not self.initialized:
+            await self.initialize_network(rules)
+            
+        # Process facts through Rete network
+        logger.info("processing facts via Rete network")
+        matched_rules = self.rete_network.process_facts(facts)
+        
+        # Collect results
+        return [{
+            'rule_name': rule['name'],
+            'conditions_met': True,
+            'actions': rule['actions'],
+            'matched_conditions': self._get_matched_conditions(rule, facts)
+        } for rule in matched_rules]
+
+    def _get_matched_conditions(self, rule, facts):
+        """Determine which conditions were matched (simplified)"""
+        # Implementation would trace through Rete activation path
+        return [{"condition": "implement matched conditions tracking"}]
 # Updated Rule Model to support enhanced metadata
 class EnhancedRuleModel(BaseModel):
     name: str
@@ -1054,13 +1568,33 @@ class RuleCreate(BaseModel):
     conditions: Dict[str, Any]
     actions: List[Action]
 
-    @validator('actions')
-    def validate_actions(cls, v):
-        for action in v:
-            if action.parameters is None and (action.key is None or action.value is None):
-                raise ValueError("Action must have either parameters or key/value pair")
+    @validator('actions', pre=True)
+    def wrap_single_action(cls, v):
+        if isinstance(v, dict):
+            return [v]
         return v
     
+
+    @validator('conditions')
+    def validate_conditions(cls, v):
+        """Basic validation of conditions structure"""
+        if not v:
+            raise ValueError("Conditions cannot be empty")
+            
+        # Check for logical operators or field conditions
+        if not any(op in v for op in ['and', 'or', 'refRule']):
+            # Must be a field condition with proper structure
+            if not any(isinstance(details, dict) and 'operator' in details for details in v.values()):
+                raise ValueError("Invalid condition format - must use logical operators or field conditions")
+                
+        # Validate 'and'/'or' structures
+        if 'and' in v and (not isinstance(v['and'], list) or not v['and']):
+            raise ValueError("'and' operator must have a non-empty list of conditions")
+            
+        if 'or' in v and (not isinstance(v['or'], list) or not v['or']):
+            raise ValueError("'or' operator must have a non-empty list of conditions")
+            
+        return v   
 
 
 # --------------------------
@@ -1139,12 +1673,27 @@ class RuleCache:
                 logger.error(f"Cache refresh failed: {str(e)}")
                 raise
 
+# Add to your database models
+class UploadReport(Base):
+    __tablename__ = "upload_reports2"
+    
+    id = Column(UUID, primary_key=True, default=uuid.uuid4)
+    filename = Column(String)
+    upload_timestamp = Column(DateTime, default=datetime.now)
+    processing_time = Column(Float)
+    stats = Column(JSON)  # {success_rate: 0.95, total_rules: 20, successful: 19, failed: 1}
+    errors = Column(JSON)  # List of error objects
+    context = Column(String)            
+
 # --------------------------
 # FastAPI Setup
 # --------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
+        # Add UUID extension if using PostgreSQL
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\""))
+        await conn.run_sync(Base.metadata.create_all)
         # Check if tables exist first
         logger.info("chaecking for table existence")
         if not await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table("rules3456716")):
@@ -1197,6 +1746,9 @@ async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
+        except Exception as e:
+            await session.rollback()
+            raise
         finally:
             await session.close()
 
@@ -1335,188 +1887,6 @@ async def _handle_date_comparison(condition: Dict, facts: Dict) -> bool:
 # --------------------------
 # API Endpoints
 # --------------------------
-@app.post("/upload_rules/")
-async def upload_rules(
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    cache: RuleCache = Depends(get_cache)
-):
-    """
-    Upload rules via JSON or Excel file with enhanced validation and cycle detection.
-    
-    Args:
-        file: Uploaded file (Excel or JSON)
-        db: Database session
-        cache: Rule cache instance
-        
-    Returns:
-        dict: Success message with count of uploaded rules
-        
-    Raises:
-        HTTPException: For validation errors or processing failures
-    """
-    try:
-        # Determine file type
-        filename = file.filename.lower()
-        logger.info(f"Processing uploaded file: {filename}")
-        
-        # Create temporary file
-        temp_path = f"/tmp/{filename}"
-        with open(temp_path, "wb") as buffer:
-            buffer.write(await file.read())
-        
-        # Process based on file extension
-        uploader = ExcelRuleUploader(db)
-        
-        if filename.endswith(('.xlsx', '.xls')):
-            rules_data = await uploader.validate_excel_structure(temp_path)
-        elif filename.endswith('.json'):
-            with open(temp_path, 'r') as f:
-                rules_data = json.load(f)
-                if not isinstance(rules_data, (list, dict)):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="JSON must be an array of rules or a single rule object"
-                    )
-        else:
-            raise HTTPException(
-                status_code=400, 
-                detail="Unsupported file type. Use .xlsx, .xls, or .json"
-            )
-        
-        # Clean up temporary file
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        
-        # Convert single rule to list format if needed
-        if isinstance(rules_data, dict):
-            rules_data = [rules_data]
-            
-        if not rules_data:
-            raise HTTPException(
-                status_code=400,
-                detail="No valid rules found in uploaded file"
-            )
-        
-        # Validate all rules first
-        evaluator = ContextualRuleEvaluator(db)
-        context = rules_data[0].get('context', 'default') if rules_data else 'default'
-        
-        # Only check for cycles if multiple rules exist
-        if len(rules_data) > 1:
-            try:
-                await evaluator.prepare_rule_graph(rules_data, context)
-                logger.debug("No cyclic dependencies detected")
-            except ValueError as e:
-                if "Cyclic dependencies" in str(e):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Rule validation failed: {str(e)}"
-                    )
-                raise
-        
-        # Validate each rule structure
-        valid_rules = []
-        for rule_data in rules_data:
-            try:
-                # Handle missing description
-                rule_data.setdefault('description', '')
-                
-                # Convert key/value to parameters if needed
-                if 'actions' in rule_data:
-                    for action in rule_data['actions']:
-                        if 'key' in action and 'value' in action:
-                            action['parameters'] = {
-                                'key': action.pop('key'),
-                                'value': action.pop('value')
-                            }
-                
-                valid_rules.append(RuleCreate(**rule_data))
-                
-            except ValidationError as e:
-                error_details = []
-                for err in e.errors():
-                    loc = "->".join(str(x) for x in err['loc'])
-                    error_details.append(f"{loc}: {err['msg']}")
-                
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "message": "Rule validation failed",
-                        "errors": error_details,
-                        "offending_rule": rule_data
-                    }
-                )
-        
-        # Process in transaction
-        try:
-            async with db.begin():
-                new_rule_count = 0
-                for rule in valid_rules:
-                    # Check for existing rule
-                    # To case-insensitive comparison:
-                    existing = await db.execute(
-                       select(RuleModel).where(
-                           (func.lower(RuleModel.name) == rule.name.lower()) & 
-                           (func.lower(RuleModel.context) == rule.context.lower())
-                        )
-                    )
-                    if existing.scalar():
-                        await db.rollback()
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Rule '{rule.name}' in context '{rule.context}' already exists"
-                        )
-                    
-                    # Add new rule
-                    db.add(RuleModel(
-                        context=rule.context,
-                        name=rule.name,
-                        priority=rule.priority,
-                        description=rule.description,
-                        conditions=rule.conditions,
-                        actions=[action.dict() for action in rule.actions]
-                    ))
-                    new_rule_count += 1
-                
-                await db.commit()
-                logger.info(f"Successfully added {new_rule_count} new rules")
-            
-            # Refresh cache with new independent session
-            async with AsyncSessionLocal() as refresh_db:
-                await cache.refresh(refresh_db)
-            
-            return {
-                "message": f"Successfully processed {len(valid_rules)} rules",
-                "new_rules_added": new_rule_count,
-                "context": context
-            }
-            
-        except Exception as e:
-            await db.rollback()
-            logger.error(f"Database error during rule upload: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to save rules to database"
-            )
-            
-    except HTTPException:
-        # Re-raise existing HTTP exceptions
-        raise
-        
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid JSON format"
-        )
-        
-    except Exception as e:
-        logger.error(f"Unexpected error during rule upload: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="An unexpected error occurred during rule upload"
-        )
-
 # Sample Excel Template Generation Endpoint
 @app.get("/rule_upload_template")
 async def generate_rule_upload_template():
@@ -1590,21 +1960,15 @@ async def evaluate_rules(
             if not context_rules:
                 raise HTTPException(status_code=404, detail=f"No rules found for context: {context}")
 
-        evaluator = ContextualRuleEvaluator(db)
+        evaluator = ReteRuleEvaluator(db)
+        await evaluator.initialize_network(context_rules)
         execution_order = await evaluator.prepare_rule_graph(context_rules, context)
         ordered_rules = [rule for rule in context_rules if rule['name'] in execution_order]
 
-        request_cache = EvaluationCache()  # Create instance of the correct cache class
 
-
-        evaluation_results = await asyncio.gather(
-                *[evaluator._evaluate_rule(
-                     rule=rule,
-                     facts=facts,
-                     all_rules=context_rules,  # Pass the context rules list
-                     cache=request_cache  # Pass the cache instance
-                ) for rule in ordered_rules]
-        )
+        # Evaluate using Rete
+        logger.info("evaluating using Rete network")
+        evaluation_results = await evaluator.evaluate_rules(context_rules, facts, context)
 
         # Conflict resolution for actions
         all_actions = []
@@ -1649,6 +2013,264 @@ async def evaluate_rules(
         logger.error(f"Evaluation error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
     
+
+@app.post("/upload_rules/")
+async def upload_rules(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    cache: RuleCache = Depends(get_cache),
+    sample_facts: Optional[Dict[str, Any]] = None
+):
+    """
+    Upload rules via JSON or Excel file with enhanced validation and cycle detection.
+    
+    Args:
+        file: Uploaded file (Excel or JSON)
+        db: Database session
+        cache: Rule cache instance
+        sample_facts: Optional sample facts to test rule evaluation
+        
+    Returns:
+        dict: Success message with count of uploaded rules
+        
+    Raises:
+        HTTPException: For validation errors or processing failures
+    """
+    start_time = time.time()
+    report_id = uuid.uuid4()
+    try:
+        # Determine file type
+        filename = file.filename.lower()
+        logger.info(f"Processing uploaded file: {filename}")
+        
+        # Create temporary file
+        temp_path = f"/tmp/{filename}"
+        with open(temp_path, "wb") as buffer:
+            buffer.write(await file.read())
+        
+        # Process based on file extension
+        uploader = ExcelRuleUploader(db)
+        
+        if filename.endswith(('.xlsx', '.xls')):
+            rules_data = await uploader.validate_excel_structure(temp_path)
+        elif filename.endswith('.json'):
+            with open(temp_path, 'r') as f:
+                rules_data = json.load(f)
+                if not isinstance(rules_data, (list, dict)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="JSON must be an array of rules or a single rule object"
+                    )
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Unsupported file type. Use .xlsx, .xls, or .json"
+            )
+        
+        # Clean up temporary file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        # Convert single rule to list format if needed
+        if isinstance(rules_data, dict):
+            rules_data = [rules_data]
+            
+        if not rules_data:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid rules found in uploaded file"
+            )
+        
+        # Enhanced validation with our new validator
+        validator = RuleValidator(db)
+        is_valid, validation_errors = await validator.validate_rule_set(rules_data)
+        
+        if not is_valid:
+            return {
+                "status": "error",
+                "message": "Rule validation failed",
+                "validation_errors": validation_errors
+            }
+        
+        # Test evaluation if sample facts are provided
+        test_results = []
+        if sample_facts:
+            for rule in rules_data:
+                eval_result = await validator.test_evaluate_rule(rule, sample_facts)
+                test_results.append({
+                    "rule_name": rule.get('name'),
+                    "evaluation_result": eval_result
+                })
+
+        
+        # Process in transaction
+        try:
+            
+                new_rule_count = 0
+                for rule_data in rules_data:
+                    # Add new rule (validation already confirmed no duplicates)
+                    db.add(RuleModel(
+                        context=rule_data.get('context', 'default'),
+                        name=rule_data['name'],
+                        priority=rule_data.get('priority', 5),
+                        description=rule_data.get('description', ''),
+                        conditions=rule_data['conditions'],
+                        actions=rule_data['actions']
+                    ))
+                    new_rule_count += 1
+              
+                await db.commit()
+                logger.info(f"Successfully added {new_rule_count} new rules")
+
+             
+                # New: Track processing metrics
+                processing_time = time.time() - start_time
+                success_rate = new_rule_count / len(rules_data) if rules_data else 0  
+
+                # Create report record
+                report = UploadReport(
+                   id=report_id,
+                   filename=file.filename,
+                   processing_time=processing_time,
+                   stats={
+                       "success_rate": success_rate,
+                       "total_rules_processed": len(rules_data),
+                       "successful_uploads": new_rule_count,
+                       "failed_uploads": len(rules_data) - new_rule_count
+                    },
+                     errors=validation_errors,
+                     context=rules_data[0].get('context', 'default') if rules_data else 'default'
+                )
+        
+                db.add(report)
+                await db.commit()
+            
+               # Refresh cache with new independent session
+                async with AsyncSessionLocal() as refresh_db:
+                   await cache.refresh(refresh_db)
+            
+                return {
+                    "report_id": report_id,
+                    "filename": file.filename,
+                    "processing_time": processing_time,
+                    "stats": report.stats,
+                    "errors": validation_errors,
+                    "test_results": test_results
+                }
+            
+        except Exception as e:
+           # Track error in report
+            await db.rollback()
+            error_report = UploadReport(
+               id=report_id,
+               filename=file.filename,
+               processing_time=time.time() - start_time,
+               stats={"success_rate": 0, "total_rules_processed": 0, "successful_uploads": 0, "failed_uploads": 0},
+               errors=[{"error_type": "system", "error_message": str(e)}],
+               context="error"
+            )
+            db.add(error_report)
+            await db.commit()
+            logger.error(f"Database error during rule upload: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save rules to database"
+            )
+            
+    except HTTPException:
+        # Re-raise existing HTTP exceptions
+        raise
+        
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid JSON format"
+        )
+        
+    except Exception as e:
+        logger.error(f"Unexpected error during rule upload: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred during rule upload"
+        )    
+
+@app.get("/rules/upload-reports/")
+async def get_recent_reports(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(UploadReport)
+        .order_by(UploadReport.upload_timestamp.desc())
+        .limit(10)
+    )
+    return result.scalars().all()
+
+# Modified upload endpoint
+@app.post("/rules/upload-report/")
+async def upload_rules(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    cache: RuleCache = Depends(get_cache)
+):
+    start_time = time.time()
+    report_id = uuid.uuid4()
+    
+    try:
+        # Existing processing logic...
+        
+        # New: Track processing metrics
+        processing_time = time.time() - start_time
+        success_rate = new_rule_count / len(rules_data) if rules_data else 0
+        
+        # Create report record
+        report = UploadReport(
+            id=report_id,
+            filename=file.filename,
+            processing_time=processing_time,
+            stats={
+                "success_rate": success_rate,
+                "total_rules_processed": len(rules_data),
+                "successful_uploads": new_rule_count,
+                "failed_uploads": len(rules_data) - new_rule_count
+            },
+            errors=validation_errors,
+            context=rules_data[0].get('context', 'default') if rules_data else 'default'
+        )
+        
+        db.add(report)
+        await db.commit()
+
+        return {
+            "report_id": report_id,
+            "filename": file.filename,
+            "processing_time": processing_time,
+            "stats": report.stats,
+            "errors": validation_errors,
+            "test_results": test_results
+        }
+
+    except Exception as e:
+        # Track error in report
+        await db.rollback()
+        error_report = UploadReport(
+            id=report_id,
+            filename=file.filename,
+            processing_time=time.time() - start_time,
+            stats={"success_rate": 0, "total_rules_processed": 0, "successful_uploads": 0, "failed_uploads": 0},
+            errors=[{"error_type": "system", "error_message": str(e)}],
+            context="error"
+        )
+        db.add(error_report)
+        await db.commit()
+        raise    
+
+@app.get("/rules/upload-report/{report_id}")
+async def get_report(report_id: PyUUID, db: AsyncSession = Depends(get_db)):
+    query = select(UploadReport).where(UploadReport.id == report_id)
+    result = await db.execute(query)
+    report = result.scalars().first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report    
+    
 @app.post("/evaluate/")
 async def evaluate_facts(
     facts: Dict[str, Any],
@@ -1687,6 +2309,84 @@ async def evaluate_facts(
     except Exception as e:
         logger.error(f"Evaluation error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Evaluation failed")
+
+@app.post("/validate_rules/")
+async def validate_rules(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    sample_facts: Optional[Dict[str, Any]] = None
+):
+    """
+    Validate rules without uploading them to database
+    
+    Args:
+        file: Uploaded file (Excel or JSON)
+        db: Database session
+        sample_facts: Optional sample facts to test rule evaluation
+        
+    Returns:
+        dict: Validation results
+    """
+    try:
+        # Similar file processing logic as in upload_rules
+        filename = file.filename.lower()
+        temp_path = f"/tmp/{filename}"
+        with open(temp_path, "wb") as buffer:
+            buffer.write(await file.read())
+        
+        uploader = ExcelRuleUploader(db)
+        
+        if filename.endswith(('.xlsx', '.xls')):
+            rules_data = await uploader.validate_excel_structure(temp_path)
+        elif filename.endswith('.json'):
+            with open(temp_path, 'r') as f:
+                rules_data = json.load(f)
+                if not isinstance(rules_data, (list, dict)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="JSON must be an array of rules or a single rule object"
+                    )
+        else:
+            raise HTTPException(
+                status_code=400, 
+                detail="Unsupported file type. Use .xlsx, .xls, or .json"
+            )
+        
+        # Clean up temporary file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        # Convert single rule to list format if needed
+        if isinstance(rules_data, dict):
+            rules_data = [rules_data]
+            
+        # Validate rules
+        validator = RuleValidator(db)
+        is_valid, validation_errors = await validator.validate_rule_set(rules_data)
+        
+        # Test evaluation if requested
+        test_results = []
+        if sample_facts and is_valid:
+            for rule in rules_data:
+                eval_result = await validator.test_evaluate_rule(rule, sample_facts)
+                test_results.append({
+                    "rule_name": rule.get('name'),
+                    "evaluation_result": eval_result
+                })
+        
+        return {
+            "valid": is_valid,
+            "validation_errors": validation_errors,
+            "rule_count": len(rules_data),
+            "test_results": test_results if sample_facts and is_valid else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Rule validation error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Validation failed: {str(e)}"
+        )    
 
 # --------------------------
 # Main Entry Point
