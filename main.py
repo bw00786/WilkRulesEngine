@@ -1,7 +1,9 @@
 import os
 import json
 from datetime import date
-from pydantic import BaseModel, ValidationError, validator, Field
+import hashlib
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, ValidationError, validator, Field, conint, confloat
 from abc import ABC, abstractmethod
 from sqlalchemy import text
 from sqlalchemy import func  # Add this import
@@ -20,14 +22,12 @@ from uuid import UUID as PyUUID  # Import Python's UUID type
 from sqlalchemy.dialects.postgresql import UUID  # Correct import for PostgreSQL
 from datetime import datetime
 import asyncio
-import asyncpg
 import logging
 import validator
 import time
 import pandas as pd
 from pydantic import BaseModel
 from functools import lru_cache
-import openpyxl
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -36,7 +36,7 @@ from sqlalchemy import inspect
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -92,7 +92,9 @@ async def get_redis():
     finally:
         await redis.close()
 
-   
+def sha256_hash(data: str) -> str:
+    """Generate SHA-256 hash for audit records"""
+    return hashlib.sha256(data.encode()).hexdigest()   
 
 class RuleEngineCore:
     def __init__(self):
@@ -329,7 +331,7 @@ class ReteNetwork:
             self.beta_nodes.append(beta) 
 
     def process_facts(self, facts):
-        """Evaluate facts through the Rete network with proper refRule handling"""
+        """evaluate facts through the Rete network with proper refRule handling"""
         # Store facts in working memory
         self.working_memory = facts  
         activated = set()
@@ -359,7 +361,7 @@ class ReteNetwork:
 
         return [p.rule for p in activated if isinstance(p, ProductionNode)]
     
-   
+  
     
     def _check_beta_conditions(self, beta_node, activated):
         """Check both regular conditions and rule references"""
@@ -399,14 +401,15 @@ class ProductionNode:
 
 # Define Action first
 class Action(BaseModel):
-    type: str
+    type: str  # Remove the alias to accept 'type' from input data
     parameters: Optional[Dict[str, Any]] = None
     key: Optional[str] = None
     value: Optional[Any] = None
 
     @validator('parameters')
     def validate_parameters(cls, v, values):
-        if values['type'] == 'schedule_distribution':
+        action_type = values.get('type')
+        if action_type == 'schedule_distribution':
             if 'end_type' in v and 'end_date' in v:
                 raise ValueError("Cannot specify both end_type and end_date")
         return v        
@@ -416,6 +419,20 @@ class Conflict(BaseModel):
     message: str
     actions: List[Action]
     resolution: Optional[List[Action]] = None  
+
+
+
+    def _resolve_conflict_group(self, actions: List[Dict]):
+        resolution = max(actions, key=lambda x: x['priority'])
+        conflict_detail = {
+            'type': 'priority_based_resolution',
+            'message': f"Selected action from rule {resolution['rule_name']} "
+                      f"due to higher priority ({resolution['priority']})",
+            'conflicting_actions': actions,
+            'selected_action': resolution,
+            'resolution_criteria': 'highest_priority'
+        }
+        return resolution, conflict_detail    
     
 class ConflictResolver(ABC):
     @abstractmethod
@@ -483,6 +500,16 @@ class RMDConflictResolver:
                 })
                 
         return resolutions
+    
+    def resolve(self, actions):
+        # IRS priority: Initial RMD > Uniform Table > Annual Recalculation
+        ordered_types = [
+            "initial_rmd_73_2025",
+            "apply_uniform_life_table", 
+            "subsequent_annual_rmd"
+        ]
+        return sorted(actions, 
+            key=lambda x: ordered_types.index(x['parameters']['rmd_type']))
 
     def execute(self, financial_data):
         conflicts = self.detect_conflicts(financial_data.retirement_accounts)
@@ -554,14 +581,26 @@ class RuleValidator:
         # Validate individual rules first
         all_errors = []
         for rule in rules:
-            valid, errors = await self.validate_rule(rule, rules)
+            valid, error_dicts = await self.validate_rule(rule, rules)
             if not valid:
-                all_errors.extend([{
-                   "row": 0,
-                   "rule_name": rule.get('name', 'Unknown'),
-                   "error_type": "Validation Error",
-                   "error_message": f"{errors['loc']}: {errors['msg']}"
-                }])
+                for error in error_dicts:
+                    # Add this check to handle both dictionary and string errors
+                    if isinstance(error, dict) and 'loc' in error:
+                         loc = "->".join(map(str, error['loc']))
+                         all_errors.append({
+                             "row": 0,
+                             "rule_name": rule.get('name', 'Unknown'),
+                             "error_type": "Validation Error",
+                              "error_message": f"{loc}: {error['msg']}"
+                         })
+                    else:
+                    # Handle string errors or incorrectly formatted dict errors
+                        all_errors.append({
+                            "row": 0,
+                            "rule_name": rule.get('name', 'Unknown'),
+                            "error_type": "Validation Error",
+                            "error_message": str(error)
+                       })     
         
         if all_errors:
             return False, all_errors
@@ -579,7 +618,7 @@ class RuleValidator:
         # All validations passed
         return True, []
     
-    async def validate_rule(self, rule: Dict[str, Any], all_rules: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
+    async def validate_rule(self, rule: Dict[str, Any], all_rules: List[Dict[str, Any]]) -> Tuple[bool, List[Dict]]:
         """
         Validate a single rule semantically
         
@@ -596,11 +635,8 @@ class RuleValidator:
         try:
             rule_obj = RuleCreate(**rule)
         except ValidationError as e:
-            for err in e.errors():
-                loc = "->".join(str(x) for x in err['loc'])
-                errors.append(f"{loc}: {err['msg']}")
-            return False, errors
-            
+            errors.extend(e.errors())  # Pydantic errors are already dicts with 'loc' and 'msg'
+        
         # Validate condition structure and references
         condition_errors = self._validate_conditions(rule.get('conditions', {}), all_rules)
         errors.extend(condition_errors)
@@ -612,29 +648,30 @@ class RuleValidator:
         # Check for duplicate rule names
         duplicate = await self._check_duplicate_rule(rule.get('name', ''), rule.get('context', 'default'))
         if duplicate:
-            errors.append(f"Rule with name '{rule.get('name')}' already exists in context '{rule.get('context')}'")
+            errors.append({'loc': ('name',), 'msg': f"Rule name already exists in context '{rule.get('context')}'"})
         
-        return len(errors) == 0, errors
+        return (len(errors) == 0, errors)
     
-    def _validate_conditions(self, conditions: Dict[str, Any], all_rules: List[Dict[str, Any]]) -> List[str]:
+    def _validate_conditions(self, conditions: Dict[str, Any], all_rules: List[Dict[str, Any]]) -> List[Dict]:
         """Validate condition structure and references"""
         errors = []
         
         # Handle empty conditions
         if not conditions:
-            return ["Conditions cannot be empty"]
+           errors.append({'loc': ('conditions',), 'msg': "Conditions cannot be empty"})
+           return errors  # Return dict-based errors, not strings
             
         # Check for logical operator structure
         if not any(op in conditions for op in ['and', 'or', 'refRule']):
             # Single condition check
             if not self._is_valid_condition_format(conditions):
-                errors.append("Invalid condition format. Expected operators like 'and', 'or', or field conditions.")
+                errors.append({'loc': ('conditions',), 'msg': "Invalid condition format. Expected operators like 'and', 'or', or field conditions."})
         
         # Check referenced rules
         ref_rules = self._extract_referenced_rules(conditions)
         for ref_rule in ref_rules:
             if not any(r.get('name') == ref_rule for r in all_rules):
-                errors.append(f"Referenced rule '{ref_rule}' does not exist")
+                errors.append({'loc': ('conditions', 'refRule'), 'msg': f"Referenced rule '{ref_rule}' does not exist"})
         
         # Validate logical structure
         if 'and' in conditions:
@@ -698,11 +735,13 @@ class RuleValidator:
                             
         return ref_rules
     
-    def _validate_actions(self, actions: List[Dict[str, Any]]) -> List[str]:
+    def _validate_actions(self, actions: List[Dict[str, Any]]) -> List[Dict]:
         """Validate action structure and required parameters"""
         errors = []
         
-        for action in actions:
+        for idx, action in enumerate(actions):
+            if 'type' not in action:
+                errors.append({'loc': ('actions', idx), 'msg': "Action missing 'type' field"})
             action_type = action.get('type')
             params = action.get('parameters', {})
             
@@ -712,8 +751,10 @@ class RuleValidator:
                 
             # Type-specific validation
             if action_type == 'schedule_distribution':
-                if 'amount' not in params:
-                    errors.append("'schedule_distribution' action requires 'amount' parameter")
+                amount_keys = [key for key in params if 'amount' in key.lower()]
+                if not amount_keys:
+                    logger.info(f"checking for amount in {params}")
+                    errors.append("'schedule_distribution' action requires a parameter containing 'amount'")
                 
                 # Check end_type and end_date are not both specified
                 if 'end_type' in params and 'end_date' in params:
@@ -1040,49 +1081,66 @@ class ExcelRuleUploader:
     
 
     async def validate_excel_structure(self, file_path: str) -> List[Dict[str, Any]]:
-            """
-                Validate Excel file structure and convert to rules
-        
-                 Expected Excel Columns:
-                 - context (str): context of rules
-                 - name (str): Rule name
-                 - priority (int): Rule priority
-                 - description (str): Rule description
-                 - conditions (json): Conditions in JSON format
-                 - actions (json): Actions in JSON format
-
-            """
-            def parse_value(val):
-                try:
-                   return int(val)
-                except ValueError:
-                     try:
-                        return float(val)
-                     except ValueError:
-                         return val
+        def parse_value(val):
             try:
-                # Read Excel file
+                return int(val)
+            except ValueError:
+                try:
+                    return float(val)
+                except ValueError:
+                    return val
+
+        try:
                 df = pd.read_excel(file_path)
-            
-                # Required columns
-                required_columns = [
-                  'context', 'name',  'priority', 'description', 
-                  'conditions', 'actions'
-                ]
-            
-                # Check if all required columns exist
-                missing_columns = [col for col in required_columns if col not in df.columns]
-                if missing_columns:
-                   raise ValueError(f"Missing columns: {', '.join(missing_columns)}")
-            
-                # Convert DataFrame to list of dictionaries
+                required_columns = ['context', 'name', 'priority', 'description', 'conditions', 'actions']
+        
+                if missing := [col for col in required_columns if col not in df.columns]:
+                   raise ValueError(f"Missing columns: {', '.join(missing)}")
+
                 rules = []
-                for _, row in df.iterrows():
+                for idx, row in df.iterrows():
+                    excel_row_num = idx + 2  # Account for header row
                     try:
-                       # Parse JSON strings for conditions and actions
-                       conditions = json.loads(row['conditions'], parse_float=parse_value, parse_int=parse_value)
-                       actions = json.loads(row['actions']) if isinstance(row['actions'], str) else row['actions']
-                    
+                       # SINGLE PARSE with error context
+                       raw_actions = row['actions']
+                      
+                       try:
+                          actions = json.loads(raw_actions) if isinstance(raw_actions, str) else raw_actions
+                          logger.debug(f"Validated actions for row {excel_row_num}: {json.dumps(actions, indent=2)}") 
+
+                       except json.JSONDecodeError as e:
+                           raise ValueError(f"Invalid JSON in actions (Row {excel_row_num}): {str(e)} Action: {actions}")
+
+                       # Process conditions
+                       raw_conditions = row['conditions']
+                       try:
+                           conditions = json.loads(
+                           raw_conditions,
+                           parse_float=parse_value,
+                           parse_int=parse_value
+                           )
+                       except json.JSONDecodeError as e:
+                            raise ValueError(f"Invalid JSON in conditions (Row {excel_row_num}): {str(e)} Conditions: {conditions}")    
+
+                       # Validate individual actions first
+
+                       if not isinstance(actions, list):
+                          raise ValueError(f"Actions must be an array in row {excel_row_num}")
+                       for action_idx, action in enumerate(actions, 1):
+                           if not isinstance(action, dict):
+                                raise ValueError(f"Action {action_idx} must be an object in row {excel_row_num}")
+                           if 'type' not in action:
+                              raise ValueError(f"Action {action_idx} missing 'type' in row {excel_row_num}")
+                           if 'parameters' not in action:
+                              raise ValueError(f"Action {action_idx} missing 'parameters' in row {excel_row_num}")
+
+                       # Now parse conditions with numeric handling
+                       conditions = json.loads(
+                          row['conditions'],
+                          parse_float=parse_value,
+                          parse_int=parse_value
+                       )
+
                        rule = {
                            'context': str(row['context']),
                            'name': str(row['name']),
@@ -1090,34 +1148,25 @@ class ExcelRuleUploader:
                            'description': str(row['description']),
                            'conditions': conditions,
                            'actions': actions
-                        }
-                    
-                        # Validate rule structure
+                       }
+
+                       # Validate with Pydantic
                        RuleCreate(**rule)
                        rules.append(rule)
-                
-                    except (json.JSONDecodeError, ValidationError) as e:
-                       self.logger.error(f"Invalid rule in row: {row}. Error: {str(e)}")
-                       raise HTTPException(
-                          status_code=400, 
-                          detail=f"Invalid rule structure in row: {str(e)}"
-                       )
-            
-                    return rules
-        
-            except Exception as e:
-                self.logger.error(f"Excel file processing error: {str(e)}")
-                raise HTTPException(
-                          status_code=400, 
-                          detail=f"Excel file processing failed: {str(e)}"
-                )
-            finally:
-                         # Clean up temporary file if it exists
-                if os.path.exists(file_path):
-                    try:
-                       os.remove(file_path)
+
                     except Exception as e:
-                       logger.warning(f"Error deleting temp file: {str(e)}")      
+                       logger.error(f"Error in Excel row {excel_row_num} (ID: {row.get('id', 'N/A')}): {str(e)}")
+                       raise HTTPException(400, detail=f"Row {excel_row_num}: {str(e)}")
+
+                return rules
+
+        except Exception as e:
+                logger.error(f"Excel processing failed: {str(e)}", exc_info=True)
+                raise HTTPException(400, detail=f"File validation failed: {str(e)}")
+        finally:
+                if os.path.exists(file_path):
+                    try: os.remove(file_path)
+                    except Exception as e: logger.warning(f"Cleanup error: {str(e)}")    
 
 # --------------------------
 # Pydantic Models
@@ -1219,6 +1268,48 @@ class ActionConflictResolver:
             actions,
             key=lambda x: (-x["priority"], x["exec_order"]),
         )        
+    
+class EnhancedActionConflictResolver(ActionConflictResolver):
+    def resolve_conflicts(self, all_actions: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+        resolved = []
+        conflicts = []
+        
+        for action_type, actions in self._group_actions_by_type(all_actions).items():
+            if len(actions) > 1:
+                resolution, conflict = self._resolve_conflict_group(actions)
+                resolved.append(resolution)
+                conflicts.append(conflict)
+            else:
+                resolved.extend(actions)
+                
+        return resolved, conflicts
+
+    def _resolve_conflict_group(self, actions: List[Dict]):
+        resolution = max(actions, key=lambda x: x['priority'])
+        conflict_detail = {
+            'type': 'priority_based_resolution',
+            'message': f"Selected action from rule {resolution['rule_name']} "
+                      f"due to higher priority ({resolution['priority']})",
+            'conflicting_actions': actions,
+            'selected_action': resolution,
+            'resolution_criteria': 'highest_priority'
+        }
+        return resolution, conflict_detail    
+    
+class RuleNamingService:
+    CONTEXT_MAP = {
+        'rmd': 'RetirementDistribution',
+        'espp': 'EmployeeStockPlan',
+        'hsa': 'HealthSavingsAccount'
+    }
+
+    @classmethod
+    def get_full_name(cls, rule: Dict) -> str:
+        base_name = rule['name'].replace(' ', '')
+        context = cls.CONTEXT_MAP.get(rule['context'], 'General')
+        return f"{context}_{base_name}_v{rule.get('version', 1)}"
+
+
       
 class ContextualRuleEvaluator:
     def __init__(self, db: AsyncSession):
@@ -1557,9 +1648,6 @@ class EnhancedRuleModel(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)    
 
 
-
-
-
 class RuleCreate(BaseModel):
     context: str = Field(default="default")
     name: str
@@ -1601,7 +1689,7 @@ class RuleCreate(BaseModel):
 # Database Models
 # --------------------------
 class RuleModel(Base):
-    __tablename__ = "rules3456716"
+    __tablename__ = "rules3456717_9"
     id = Column(Integer, primary_key=True, index=True)
     context = Column(String, index=True) 
     name = Column(String, index=True)
@@ -1685,20 +1773,126 @@ class UploadReport(Base):
     errors = Column(JSON)  # List of error objects
     context = Column(String)            
 
+    
+    @validator('beneficiary_allocation')
+    def validate_allocation(cls, v):
+        if not (0 <= v <= 100):
+            raise ValueError("Allocation must be 0-100%")
+        return v   
+
+class MerkleNode:
+    def __init__(self, hash: str):
+        self.hash = hash
+        self.left = None
+        self.right = None
+
+class MerkleTree:
+    def __init__(self):
+        self.root = None
+        self.leaves = []
+
+    def add_block(self, data: dict):
+        """Add new audit record to the tree"""
+        data_str = json.dumps(data, sort_keys=True)
+        leaf_hash = sha256_hash(data_str)
+        self.leaves.append(MerkleNode(leaf_hash))
+        self._build_tree()
+
+    def _build_tree(self):
+        """Build Merkle tree from leaves"""
+        nodes = self.leaves.copy()
+        while len(nodes) > 1:
+            new_level = []
+            for i in range(0, len(nodes), 2):
+                left = nodes[i]
+                right = nodes[i+1] if i+1 < len(nodes) else nodes[i]
+                combined = left.hash + right.hash
+                parent_hash = sha256_hash(combined)
+                parent = MerkleNode(parent_hash)
+                parent.left, parent.right = left, right
+                new_level.append(parent)
+            nodes = new_level
+        self.root = nodes[0] if nodes else None
+
+    def get_root_hash(self) -> str:
+        """Get current root hash for audit verification"""
+        return self.root.hash if self.root else ""
+
+class AuditLogger:
+    def log_evaluation(self, facts: Dict, rules: List, results: Dict):
+        audit_record = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "fact_hash": self._generate_hash(facts),
+            "rule_versions": {r['name']: r['version'] for r in rules},
+            "evaluation_id": uuid.uuid4(),
+            "results": {
+                "triggered_rules": results['evaluation_results'],
+                "conflicts": results['action_conflicts'],
+                "final_actions": results['resolved_actions']
+            },
+            "system_state": {
+                "rule_engine_version": "2.3.1",
+                "irs_table_version": "2024-02",
+                "dependency_graph_hash": self._generate_hash(results['dependency_graph'])
+            }
+        }
+        self._store_to_immutable_db(audit_record)
+
+class ImmutableAuditStore:
+    def __init__(self):
+        self.merkle_tree = MerkleTree()
+        self.ledger = []
+        self.last_hash = "0" * 64  # Genesis block hash
+
+    def _write_to_worm_storage(self, block: dict):
+        """Write Once Read Many (WORM) storage implementation"""
+        self.ledger.append(block)
+        self.last_hash = block['data_hash']
+
+    def store_record(self, record: dict):
+        block = {
+            "previous_hash": self.last_hash,
+            "data_hash": sha256_hash(json.dumps(record)),
+            "timestamp": datetime.utcnow().isoformat(),
+            "data": record
+        }
+        self.merkle_tree.add_block(block)
+        self._write_to_worm_storage(block)
+
+    def verify_integrity(self) -> bool:
+        """Verify blockchain-style integrity"""
+        for i in range(1, len(self.ledger)):
+            current = self.ledger[i]
+            previous = self.ledger[i-1]
+            
+            if current['previous_hash'] != previous['data_hash']:
+                return False
+                
+            calculated_hash = sha256_hash(json.dumps(current['data']))
+            if current['data_hash'] != calculated_hash:
+                return False
+                
+        return True
+
 # --------------------------
 # FastAPI Setup
 # --------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize audit storage once at startup
+    app.state.audit_store = ImmutableAuditStore()
     async with engine.begin() as conn:
         # Add UUID extension if using PostgreSQL
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\""))
         await conn.run_sync(Base.metadata.create_all)
         # Check if tables exist first
         logger.info("chaecking for table existence")
-        if not await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table("rules3456716")):
+        if not await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table("rules3456717_9")):
             await conn.run_sync(Base.metadata.create_all)
     yield
+
+    logger.info("Final audit root hash: %s", app.state.audit_store.merkle_tree.get_root_hash())
+
     
     # Rest of your lifespan code...
     redis = Redis.from_url(REDIS_URL, decode_responses=True)
@@ -1711,7 +1905,7 @@ async def lifespan(app: FastAPI):
 
 def check_and_update_columns(conn):
     # CORRECTED TABLE NAME TO MATCH MODEL
-    table_name = "rules3456716"
+    table_name = "rules3456717_9"
     
     inspector = inspect(conn)
     
@@ -1735,7 +1929,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["POST", "GET"],  # Explicitly list allowed methods,
     allow_headers=["*"],
 )
 
@@ -1934,13 +2128,14 @@ class evaluate_rules(BaseModel):
 # evaulate rules
 @app.post("/evaluate_rules/")
 async def evaluate_rules(
-    request: EvaluateRulesRequest,
+    evaluate_request: EvaluateRulesRequest,  # Renamed parameter
+    request: Request,  # Injected FastAPI Request
     db: AsyncSession = Depends(get_db),
     cache: RuleCache = Depends(get_cache)
 ):
     try:
-        context = request.context
-        facts = request.facts
+        context = evaluate_request.context  # Use renamed parameter
+        facts = evaluate_request.facts
 
         cached_rules = await cache.get_rules()
         context_rules = [rule for rule in cached_rules if rule['context'] == context]
@@ -1986,6 +2181,20 @@ async def evaluate_rules(
         resolver = ActionConflictResolver()
         resolved_actions, action_conflicts = resolver.resolve_conflicts(all_actions)
 
+        audit_record = {
+             "timestamp": datetime.utcnow().isoformat(),
+             "user": "system",
+             "action": "Rules Evaluation",
+             "details": {
+                   "context": evaluate_request.context,  # Changed from request.context
+                   "rules_applied": [r['rule_name'] for r in evaluation_results]  # Ensure correct key
+    }
+}
+        
+        # Store in audit chain
+        request.app.state.audit_store.store_record(audit_record)
+
+
         return {
             "context": context,
             "input_facts": facts,
@@ -1997,20 +2206,30 @@ async def evaluate_rules(
                     "actions_triggered": result.get('actions', []),
                     "matched_conditions": result.get('matched_conditions', []),
                     "execution_time_ms": round(result.get('execution_time', 0) * 1000, 2),
+                    "audit_trace_id": audit_record["timestamp"],
                     "error": result.get('error')
                 }
-                for rule, result in zip(ordered_rules, evaluation_results)
+                for result in evaluation_results
             ],
             "resolved_actions": resolved_actions,
             "action_conflicts": action_conflicts,
             "execution_order": execution_order,
             "dependency_graph": evaluator.dependency_graph.export_dependency_graph()
+           
         }
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Evaluation error: {str(e)}", exc_info=True)
+        # Store error in audit log
+        error_record = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "user": "system",
+            "action": "Evaluation Error",
+            "details": str(e)
+        }
+        request.app.state.audit_store.store_record(error_record)
         raise HTTPException(status_code=500, detail=str(e))
     
 
@@ -2036,6 +2255,7 @@ async def upload_rules(
     Raises:
         HTTPException: For validation errors or processing failures
     """
+    logger.info(f"processing file {file}")
     start_time = time.time()
     report_id = uuid.uuid4()
     try:
@@ -2156,7 +2376,9 @@ async def upload_rules(
                     "stats": report.stats,
                     "errors": validation_errors,
                     "test_results": test_results
+                   
                 }
+                
             
         except Exception as e:
            # Track error in report
@@ -2179,9 +2401,11 @@ async def upload_rules(
             
     except HTTPException:
         # Re-raise existing HTTP exceptions
+        logger.error(" Re-raise existing HTTP exceptions")
         raise
         
     except json.JSONDecodeError:
+        logger.error("Invalid JSON format")
         raise HTTPException(
             status_code=400,
             detail="Invalid JSON format"
@@ -2193,7 +2417,22 @@ async def upload_rules(
             status_code=500,
             detail="An unexpected error occurred during rule upload"
         )    
-
+@app.get("/upload_rules/", include_in_schema=False)
+async def upload_rules_help():
+    return {
+        "message": "Use POST to upload rules",
+        "expected_format": {
+            "file": "Excel/JSON file with rules",
+            "sample_facts": "(Optional) Test facts payload"
+        }
+    }
+"""@app.get("/audit/integrity")
+async def verify_audit_integrity(app: FastAPI = Depends(get_app)):
+    return {
+        "is_valid": app.state.audit_store.verify_integrity(),
+        "root_hash": app.state.audit_store.merkle_tree.get_root_hash(),
+        "block_count": len(app.state.audit_store.ledger)
+    }"""
 @app.get("/rules/upload-reports/")
 async def get_recent_reports(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
