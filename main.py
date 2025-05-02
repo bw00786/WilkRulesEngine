@@ -174,8 +174,10 @@ class ReteNetwork:
         self.rule_dependencies = defaultdict(set)  # Track rule dependencies
 
     def _check_join_conditions(self, beta_node, facts):
+
     ##Check if the beta node's join conditions are satisfied by the facts
         if beta_node.operator == 'and':
+            results = []
             # For AND nodes, all conditions must be met
             for condition in beta_node.conditions:
                 if not self._evaluate_condition(condition, facts):
@@ -271,17 +273,17 @@ class ReteNetwork:
         self._build_condition_tree(rule['conditions'], prod_node)
 
     def _build_condition_tree(self, conditions, parent_node):
-        """Recursively build Rete nodes from conditions"""
-        if 'and' in conditions:
-            beta = BetaNode('and')
-            for cond in conditions['and']:
-                self._process_condition(cond, beta)
-            beta.successors.append(parent_node)
-            self.beta_nodes.append(beta)
-        elif 'or' in conditions:
-            beta = BetaNode('or')
-            for cond in conditions['or']:
-                self._process_condition(cond, beta)
+        if 'and' in conditions or 'or' in conditions:
+            operator = 'and' if 'and' in conditions else 'or'
+            beta = BetaNode(operator)
+        
+            for cond in conditions[operator]:
+                if isinstance(cond, dict) and ('and' in cond or 'or' in cond):
+                    # Handle nested logical operators
+                    self._build_condition_tree(cond, beta)
+                else:
+                     self._process_condition(cond, beta)
+                
             beta.successors.append(parent_node)
             self.beta_nodes.append(beta)
         else:
@@ -1185,10 +1187,42 @@ class EvaluationCache:
 class ActionConflictResolver:
     def __init__(self):
         self.conflict_rules = [
+            self._detect_status_conflicts,  # Add this first
             self._detect_scheduling_conflicts,
             self._detect_calculation_conflicts
-           
         ]
+
+    def _detect_status_conflicts(self, actions: List[Dict]) -> Tuple[Optional[Dict], List[Dict]]:
+        """Detect and resolve conflicting status actions"""
+        status_actions = [
+            a for a in actions 
+            if a["action"]["type"] == "set_application_status"
+        ]
+        
+        if len(status_actions) < 2:
+            return None, actions
+
+        status_values = [a["action"]["parameters"]["status"] for a in status_actions]
+        
+        # Handle Approve/Decline conflicts
+        if "Declined" in status_values and "Approved" in status_values:
+            declined_actions = [a for a in status_actions 
+                              if a["action"]["parameters"]["status"] == "Declined"]
+            
+            # Select highest priority decline action
+            selected = max(declined_actions, 
+                          key=lambda x: (x["priority"], -x["exec_order"]))
+            
+            conflict_detail = {
+                "type": "status_conflict",
+                "message": "Application has both Approve and Decline actions",
+                "conflicting_actions": status_actions,
+                "selected_action": selected,
+                "resolution_criteria": "decline_takes_precedence"
+            }
+            return conflict_detail, [selected]
+        
+        return None, actions    
 
     def resolve_conflicts(self, all_actions: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
         """Main entry point for conflict resolution"""
@@ -1263,11 +1297,15 @@ class ActionConflictResolver:
         return groups
 
     def _prioritize_actions(self, actions: List[Dict]) -> List[Dict]:
-        """Sort actions by priority and execution order"""
+        """Sort with status precedence as tiebreaker"""
         return sorted(
             actions,
-            key=lambda x: (-x["priority"], x["exec_order"]),
-        )        
+            key=lambda x: (
+                -x["priority"], 
+                x["exec_order"],
+                0 if x["action"]["parameters"].get("status") == "Declined" else 1
+            ),
+        )      
     
 class EnhancedActionConflictResolver(ActionConflictResolver):
     def resolve_conflicts(self, all_actions: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
@@ -1651,7 +1689,7 @@ class EnhancedRuleModel(BaseModel):
 class RuleCreate(BaseModel):
     context: str = Field(default="default")
     name: str
-    priority: int = Field(5, ge=1, le=10)
+    priority: int = Field(5, ge=1, le=30)
     description: str = Field(default="No description provided")
     conditions: Dict[str, Any]
     actions: List[Action]
@@ -1683,13 +1721,23 @@ class RuleCreate(BaseModel):
             raise ValueError("'or' operator must have a non-empty list of conditions")
             
         return v   
+    
+    class RuleCreate(BaseModel):
+       # Existing fields
+       priority: int = Field(10, ge=1, le=30)  # Change default to 10
+    
+       @validator('priority')
+       def validate_priority(cls, v):
+            if v > 25:  # Critical rules range
+                logger.warning(f"Very high priority rule ({v}), ensure proper conflict handling")
+            return v
 
 
 # --------------------------
 # Database Models
 # --------------------------
 class RuleModel(Base):
-    __tablename__ = "rules3456717_9"
+    __tablename__ = "rules3456717_5"
     id = Column(Integer, primary_key=True, index=True)
     context = Column(String, index=True) 
     name = Column(String, index=True)
@@ -1887,7 +1935,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
         # Check if tables exist first
         logger.info("chaecking for table existence")
-        if not await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table("rules3456717_9")):
+        if not await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table("rules3456717_5")):
             await conn.run_sync(Base.metadata.create_all)
     yield
 
@@ -1905,11 +1953,11 @@ async def lifespan(app: FastAPI):
 
 def check_and_update_columns(conn):
     # CORRECTED TABLE NAME TO MATCH MODEL
-    table_name = "rules3456717_9"
+    table_name = "rules3456717_5"
     
     inspector = inspect(conn)
     
-    # Check if table exists first
+    # Check if table exists first an run
     if not inspector.has_table(table_name):
         return
         
