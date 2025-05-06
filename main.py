@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from datetime import date
 import hashlib
 from fastapi.responses import RedirectResponse
@@ -66,6 +67,68 @@ CACHE_TTL = 300  # 5 minutes
 MAX_POOL_SIZE = int(os.getenv('POOL_SIZE', 20))
 MAX_OVERFLOW = int(os.getenv('MAX_OVERFLOW', 5))
 DATABASE_PORT = int(os.getenv('DATABASE_PORT', 54321))
+
+#Rule-based mapping for natural language actions
+
+def parse_action(action_text: str) -> Dict[str, Any]:
+   
+
+        ACTION_PATTERNS = [
+            {
+            
+            "pattern": r"(?i)^set\s+(\w+)\s+to\s+(.*)$",
+            "action_builder": lambda m: {
+                "type": "set", 
+                "field": m.group(1).strip(),
+                "value": m.group(2).strip().strip("'\"")  # Remove surrounding quotes
+            }   
+            },
+            {
+            "pattern": r"(?i)^send\s+email\s+to\s+(\w+@\w+\.\w+)$",
+            "action_builder": lambda m: {"type": "notify", "method": "email", "to": m.group(1)},
+            },
+            {
+            "pattern": r"(?i)^increase\s+(\w+)\s+by\s+([\d.]+)$",
+            "action_builder": lambda m: {"type": "math", "operation": "add", "field": m.group(1), "value": float(m.group(2))},
+            },
+            {
+            "pattern": r"(?i)^decrease\s+(\w+)\s+by\s+([\d.]+)$",
+            "action_builder": lambda m: {"type": "math", "operation": "subtract", "field": m.group(1), "value": float(m.group(2))},
+            },
+            {
+            "pattern": r"(?i)^append\s+(.+)\s+to\s+(\w+)$",
+            "action_builder": lambda m: {"type": "append", "field": m.group(2), "value": m.group(1)},
+            },
+        ]
+
+        for pattern in ACTION_PATTERNS:
+            match = re.match(pattern["pattern"], action_text.strip())
+            if match:
+                return pattern["action_builder"](match)
+
+        raise ValueError(f"Unrecognized action format: '{action_text}'")
+
+def parse_actions(action_text: str) -> List[Dict[str, Any]]:
+    if not isinstance(action_text, str):
+        raise ValueError("Actions must be a string")
+
+    parts = [part.strip() for part in action_text.split(';') if part.strip()]
+    parsed_actions = []
+    errors = []
+
+    for idx, part in enumerate(parts, 1):
+        try:
+            parsed = parse_action(part)
+            parsed_actions.append(parsed)
+        except Exception as e:
+            logger.warning(f"Failed to parse action #{idx} in '{part}': {str(e)}")
+            errors.append(f"Action #{idx} failed: {str(e)}")
+
+    if not action_text.strip():
+        return []
+    
+    return [parse_action(part) for part in action_text.split(';') if part.strip()]
+
 
 
 # Create SQLAlchemy async engine
@@ -1081,94 +1144,150 @@ class ExcelRuleUploader:
         self.logger = logging.getLogger(__name__)
 
     
+    
 
-    async def validate_excel_structure(self, file_path: str) -> List[Dict[str, Any]]:
-        def parse_value(val):
-            try:
-                return int(val)
-            except ValueError:
-                try:
-                    return float(val)
-                except ValueError:
-                    return val
-
+    
+    @staticmethod
+    def parse_value(value_str: str) -> Any:
+        """Parse a string value into appropriate Python type."""
+        value_str = value_str.strip()
+    
+        # Handle lists
+        if value_str.startswith('[') and value_str.endswith(']'):
+            items = [ExcelRuleUploader.parse_value(item.strip()) for item in value_str[1:-1].split(',')]
+            return items
+    
+        # Handle booleans
+        if value_str.lower() == 'true':
+            return True
+        if value_str.lower() == 'false':
+            return False
+    
+        # Handle numbers
         try:
-                df = pd.read_excel(file_path)
-                required_columns = ['context', 'name', 'priority', 'description', 'conditions', 'actions']
+            return int(value_str)
+        except ValueError:
+            try:
+                return float(value_str)
+            except ValueError:
+                pass
+    
+        # Handle quoted strings
+        if (value_str.startswith("'") and value_str.endswith("'")) or (value_str.startswith('"') and value_str.endswith('"')):
+            return value_str[1:-1]
+    
+        return value_str
+
+    @staticmethod
+    def parse_dsl_condition(condition_str: str) -> dict:
+        """Parse a DSL condition string into structured JSON format."""
+        condition_str = condition_str.strip()
+        if not condition_str:
+            return {}
+    
+        logical_operator = None
+        clauses = []
+    
+        # Split by logical operators with surrounding spaces to avoid partial matches
+        if ' and ' in condition_str:
+            clauses = condition_str.split(' and ')
+            logical_operator = 'and'
+        elif ' or ' in condition_str:
+            clauses = condition_str.split(' or ')
+            logical_operator = 'or'
+        else:
+            clauses = [condition_str]
+    
+        parsed_clauses = []
+        for clause in clauses:
+            clause = clause.strip()
+            if not clause:
+                continue
         
-                if missing := [col for col in required_columns if col not in df.columns]:
-                   raise ValueError(f"Missing columns: {', '.join(missing)}")
+            # Use regex to extract field, operator, and value
+            match = re.match(
+                r'^\s*([\w\.]+)\s*(>=|<=|>|<|==|!=|in|not\s+in)\s*(.+)$', 
+                clause, 
+                re.IGNORECASE
+            )
+            if not match:
+                raise ValueError(f"Invalid condition clause: '{clause}'")
+        
+            field = match.group(1)
+            operator = match.group(2).lower().replace(' ', '')  # Handle 'not in'
+            value_str = match.group(3).strip()
+        
+            value = ExcelRuleUploader.parse_value(value_str)
+        
+            # Validate 'in'/'not_in' operators require a list
+            if operator in ['in', 'not_in'] and not isinstance(value, list):
+                raise ValueError(f"Operator '{operator}' requires a list value in clause: '{clause}'")
+        
+            parsed_clauses.append({field: {'operator': operator, 'value': value}})
+    
+        # Build the final condition structure
+        if logical_operator and len(parsed_clauses) > 1:
+            return {logical_operator: parsed_clauses}
+        elif len(parsed_clauses) == 1:
+            return parsed_clauses[0]
+        else:
+            return {}
+        
+    async def validate_excel_structure(self, file_path: str) -> List[Dict[str, Any]]:
+        try:
+            df = pd.read_excel(file_path)
+            required_columns = ['context', 'name', 'priority', 'description', 'conditions', 'actions']
+            
+            if missing := [col for col in required_columns if col not in df.columns]:
+                raise ValueError(f"Missing columns: {', '.join(missing)}")
 
-                rules = []
-                for idx, row in df.iterrows():
-                    excel_row_num = idx + 2  # Account for header row
+            rules = []
+            for idx, row in df.iterrows():
+                excel_row_num = idx + 2  # Account for header row
+                try:
+                    # Parse conditions using DSL
+                    raw_conditions = row['conditions']
+                    if pd.isna(raw_conditions) or not str(raw_conditions).strip():
+                        raise ValueError("Conditions cannot be empty")
+                    conditions = self.parse_dsl_condition(str(raw_conditions))
+                    
+                    # Parse actions as JSON or fallback to natural language parsing
+                    raw_actions = row['actions']
                     try:
-                       # SINGLE PARSE with error context
-                       raw_actions = row['actions']
-                      
-                       try:
-                          actions = json.loads(raw_actions) if isinstance(raw_actions, str) else raw_actions
-                          logger.debug(f"Validated actions for row {excel_row_num}: {json.dumps(actions, indent=2)}") 
-
-                       except json.JSONDecodeError as e:
-                           raise ValueError(f"Invalid JSON in actions (Row {excel_row_num}): {str(e)} Action: {actions}")
-
-                       # Process conditions
-                       raw_conditions = row['conditions']
-                       try:
-                           conditions = json.loads(
-                           raw_conditions,
-                           parse_float=parse_value,
-                           parse_int=parse_value
-                           )
-                       except json.JSONDecodeError as e:
-                            raise ValueError(f"Invalid JSON in conditions (Row {excel_row_num}): {str(e)} Conditions: {conditions}")    
-
-                       # Validate individual actions first
-
-                       if not isinstance(actions, list):
-                          raise ValueError(f"Actions must be an array in row {excel_row_num}")
-                       for action_idx, action in enumerate(actions, 1):
-                           if not isinstance(action, dict):
-                                raise ValueError(f"Action {action_idx} must be an object in row {excel_row_num}")
-                           if 'type' not in action:
-                              raise ValueError(f"Action {action_idx} missing 'type' in row {excel_row_num}")
-                           if 'parameters' not in action:
-                              raise ValueError(f"Action {action_idx} missing 'parameters' in row {excel_row_num}")
-
-                       # Now parse conditions with numeric handling
-                       conditions = json.loads(
-                          row['conditions'],
-                          parse_float=parse_value,
-                          parse_int=parse_value
-                       )
-
-                       rule = {
-                           'context': str(row['context']),
-                           'name': str(row['name']),
-                           'priority': int(row['priority']),
-                           'description': str(row['description']),
-                           'conditions': conditions,
-                           'actions': actions
-                       }
-
-                       # Validate with Pydantic
-                       RuleCreate(**rule)
-                       rules.append(rule)
-
+                        if isinstance(raw_actions, str) and raw_actions.strip().startswith('['):
+                            actions = json.loads(raw_actions)
+                        elif isinstance(raw_actions, str):
+                            # Directly use parse_actions without extra list wrapping
+                            actions = parse_actions(raw_actions)  
+                        elif isinstance(raw_actions, dict):
+                            actions = [raw_actions]
+                        else:
+                            raise ValueError("Unsupported action format")
                     except Exception as e:
-                       logger.error(f"Error in Excel row {excel_row_num} (ID: {row.get('id', 'N/A')}): {str(e)}")
-                       raise HTTPException(400, detail=f"Row {excel_row_num}: {str(e)}")
+                            raise ValueError(f"Invalid actions: {str(e)}")
 
-                return rules
+
+                    # Validate with Pydantic model
+                    rule = {
+                        'context': str(row['context']),
+                        'name': str(row['name']),
+                        'priority': int(row['priority']),
+                        'description': str(row['description']),
+                        'conditions': conditions,
+                        'actions': actions
+                    }
+                    RuleCreate(**rule)
+                    rules.append(rule)
+
+                except Exception as e:
+                    logger.error(rule)
+                    raise ValueError(f"Row {excel_row_num}: {str(e)}")
+
+            return rules
 
         except Exception as e:
-                logger.error(f"Excel processing failed: {str(e)}", exc_info=True)
-                raise HTTPException(400, detail=f"File validation failed: {str(e)}")
-        finally:
-                if os.path.exists(file_path):
-                    try: os.remove(file_path)
-                    except Exception as e: logger.warning(f"Cleanup error: {str(e)}")    
+            self.logger.error(f"Excel processing failed: {str(e)}", exc_info=True)
+            raise HTTPException(400, detail=f"File validation failed: {str(e)}")  
 
 # --------------------------
 # Pydantic Models
