@@ -1,5 +1,6 @@
 import os
 import json
+import re
 from datetime import date
 import hashlib
 from fastapi.responses import RedirectResponse
@@ -66,6 +67,187 @@ CACHE_TTL = 300  # 5 minutes
 MAX_POOL_SIZE = int(os.getenv('POOL_SIZE', 20))
 MAX_OVERFLOW = int(os.getenv('MAX_OVERFLOW', 5))
 DATABASE_PORT = int(os.getenv('DATABASE_PORT', 54321))
+
+#Rule-based mapping for natural language actions
+
+ACTION_PATTERNS = [
+    {
+        "kind": "type_declaration",
+        "pattern": r"(?i)^set\s+type\s+to\s+['\"]?([\w-]+)['\"]?",
+        "action_builder": lambda m: m.group(1).lower()
+    },
+    {
+        "kind": "parameter",
+        "pattern": r"(?i)^set\s+(\w+)\s+to\s+(.+)$",
+        "action_builder": lambda m: (m.group(1), parse_param_value(m.group(2)))
+    },
+    {
+        "kind": "standalone",
+        "pattern": r"(?i)^([\w-]+)$",
+        "action_builder": lambda m: m.group(1).lower()
+    }
+]
+
+def parse_action(action_text: str) -> Dict[str, Any]:
+    
+    
+    current_action = {"type": None, "parameters": {}}
+    parts = [p.strip() for p in action_text.split(';') if p.strip()]
+    
+    for part in parts:
+        matched = False
+        for pattern in ACTION_PATTERNS:
+            match = re.match(pattern["pattern"], part)
+            if match:
+                # Handle type declaration
+                if "set type" in pattern["pattern"].lower():
+                    current_action["type"] = match.group(1).lower()
+                    matched = True
+                    break
+                
+                # Handle parameters
+                if "param" in str(pattern["action_builder"]):
+                    if not current_action["type"]:
+                        raise ValueError("Must declare action type with 'set type to <action>' before parameters")
+                    param_name = match.group(1)
+                    param_value = pattern["action_builder"](match)[2]
+                    current_action["parameters"][param_name] = param_value
+                    matched = True
+                    break
+                
+                # Handle standalone action
+                if current_action["type"] is None:
+                    current_action["type"] = match.group(1).lower()
+                    matched = True
+                    break
+                
+        if not matched:
+            raise ValueError(f"Unrecognized action directive: '{part}'")
+    
+    # Validate final action
+    if not current_action["type"]:
+        raise ValueError("Missing action type. Use format: 'set type to <action_type>'")
+        
+    return current_action
+
+def parse_actions(action_text: str) -> List[Dict[str, Any]]:
+    """Handle multiple actions separated by semicolons"""
+    if not action_text.strip():
+        return []
+    
+    return [parse_action(action_text)]
+
+def handle_unrecognized_directive(self, part: str):
+    """Provide helpful error messages for common issues"""
+    # Check for common parameter typos
+    common_typos = {
+        "eligbility": "eligibility",
+        "exepctancy": "expectancy",
+        "calulation": "calculation"
+    }
+    
+    # Suggest parameter format if starts with 'set'
+    if part.lower().startswith("set "):
+        suggestion = "Did you mean 'set <parameter> to <value>'?"
+        raise ValueError(f"Invalid parameter format: '{part}'. {suggestion}")
+    
+    # Check for possible misspelled action types
+    if any(typo in part.lower() for typo in common_typos):
+        matches = [correct for wrong, correct in common_typos.items() if wrong in part]
+        raise ValueError(f"Possible typo in '{part}'. Did you mean: {', '.join(matches)}?")
+    
+    raise ValueError(f"Unrecognized action directive: '{part}'")
+
+
+def parse_param_value(value_str: str) -> Any:
+    value_str = value_str.strip()
+    
+    # Remove surrounding quotes if present
+    if (value_str.startswith("'") and value_str.endswith("'")) or \
+       (value_str.startswith('"') and value_str.endswith('"')):
+        value_str = value_str[1:-1]
+    
+    # Handle boolean values
+    if value_str.lower() in ("true", "false"):
+        return value_str.lower() == "true"
+    
+    # Handle numeric values
+    try:
+        return int(value_str)
+    except ValueError:
+        try:
+            return float(value_str)
+        except ValueError:
+            pass
+    
+    # Handle JSON objects/arrays
+    try:
+        return json.loads(value_str)
+    except json.JSONDecodeError:
+        pass
+    
+    # Handle date strings
+    try:
+        return datetime.strptime(value_str, "%Y-%m-%d").date()
+    except ValueError:
+        pass
+    
+    # Return as string if no other matches
+    return value_str
+
+
+def parse_action(action_text: str) -> Dict[str, Any]:
+    current_action = {"type": None, "parameters": {}}
+    parts = [p.strip() for p in action_text.split(';') if p.strip()]
+    
+    for part in parts:
+        matched = False
+        for pattern in ACTION_PATTERNS:
+            match = re.match(pattern["pattern"], part)
+            if not match:
+                continue
+                
+            if pattern["kind"] == "type_declaration":
+                if current_action["type"]:
+                    raise ValueError("Type declaration must be first directive")
+                current_action["type"] = pattern["action_builder"](match)
+                matched = True
+                break
+                
+            elif pattern["kind"] == "parameter":
+                if not current_action["type"]:
+                    raise ValueError("Declare action type first with 'set type to <action>'")
+                param_name, param_value = pattern["action_builder"](match)
+                current_action["parameters"][param_name] = param_value
+                matched = True
+                break
+                
+            elif pattern["kind"] == "standalone":
+                if current_action["type"] or current_action["parameters"]:
+                    raise ValueError("Standalone action can't be combined with other directives")
+                current_action["type"] = pattern["action_builder"](match)
+                matched = True
+                break
+                
+        if not matched:
+            handle_unrecognized_directive(part)
+    
+    if not current_action["type"]:
+        raise ValueError("Missing action type. Start with 'set type to <action>' or use standalone action")
+    
+    return current_action
+
+
+
+
+
+
+
+
+
+
+
+    
 
 
 # Create SQLAlchemy async engine
@@ -403,10 +585,9 @@ class ProductionNode:
 
 # Define Action first
 class Action(BaseModel):
-    type: str  # Remove the alias to accept 'type' from input data
-    parameters: Optional[Dict[str, Any]] = None
-    key: Optional[str] = None
-    value: Optional[Any] = None
+    type: str
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+
 
     @validator('parameters')
     def validate_parameters(cls, v, values):
@@ -657,6 +838,34 @@ class RuleValidator:
     def _validate_conditions(self, conditions: Dict[str, Any], all_rules: List[Dict[str, Any]]) -> List[Dict]:
         """Validate condition structure and references"""
         errors = []
+
+        def find_ref_rules(cond):
+            refs = []
+            if isinstance(cond, dict):
+                if 'refRule' in cond:
+                    refs.append(cond['refRule'])
+                for v in cond.values():
+                    refs.extend(find_ref_rules(v))
+            elif isinstance(cond, list):
+                for item in cond:
+                    refs.extend(find_ref_rules(item))
+            return refs
+        
+        ref_rules = find_ref_rules(conditions)
+        for ref in ref_rules:
+            if not any(r['name'] == ref for r in all_rules):
+                errors.append({
+                    'loc': ('conditions',),
+                    'msg': f"Referenced rule '{ref}' does not exist"
+                })
+
+        if 'refRule' in conditions:
+            rule_name = conditions['refRule']
+            if not any(r['name'] == rule_name for r in all_rules):
+                errors.append({
+                    'loc': ('conditions', 'refRule'),
+                    'msg': f"Referenced rule '{rule_name}' does not exist"
+                })
         
         # Handle empty conditions
         if not conditions:
@@ -1081,95 +1290,139 @@ class ExcelRuleUploader:
         self.logger = logging.getLogger(__name__)
 
     
+    
 
-    async def validate_excel_structure(self, file_path: str) -> List[Dict[str, Any]]:
-        def parse_value(val):
-            try:
-                return int(val)
-            except ValueError:
-                try:
-                    return float(val)
-                except ValueError:
-                    return val
-
+    ##@staticmethod
+    def parse_value(value_str: str) -> Any:
+        """Parse a string value into appropriate Python type."""
+        value_str = value_str.strip()
+        # Handle JSON-like structures
         try:
-                df = pd.read_excel(file_path)
-                required_columns = ['context', 'name', 'priority', 'description', 'conditions', 'actions']
+            return json.loads(value_str)
+        except json.JSONDecodeError:
+            pass
+    
+        # Handle lists enclosed in {}
+        if value_str.startswith('{') and value_str.endswith('}'):
+            items = [item.strip() for item in value_str[1:-1].split(',')]
+            return [ExcelRuleUploader.parse_value(item) for item in items]
         
-                if missing := [col for col in required_columns if col not in df.columns]:
-                   raise ValueError(f"Missing columns: {', '.join(missing)}")
+        # Handle booleans
+        if value_str.lower() == 'true':
+            return True
+        if value_str.lower() == 'false':
+            return False
+    
+        # Handle numbers
+        try:
+            return int(value_str)
+        except ValueError:
+            try:
+                return float(value_str)
+            except ValueError:
+                pass
+    
+        # Handle quoted strings
+        if (value_str.startswith("'") and value_str.endswith("'")) or (value_str.startswith('"') and value_str.endswith('"')):
+            return value_str[1:-1]
+    
+        return value_str
+    
+       
+    
+       
 
-                rules = []
-                for idx, row in df.iterrows():
-                    excel_row_num = idx + 2  # Account for header row
-                    try:
-                       # SINGLE PARSE with error context
-                       raw_actions = row['actions']
-                      
-                       try:
-                          actions = json.loads(raw_actions) if isinstance(raw_actions, str) else raw_actions
-                          logger.debug(f"Validated actions for row {excel_row_num}: {json.dumps(actions, indent=2)}") 
+    @staticmethod
+    def parse_dsl_condition(condition_str: str) -> dict:
+        condition_str = condition_str.strip()
+        if not condition_str:
+            return {}
 
-                       except json.JSONDecodeError as e:
-                           raise ValueError(f"Invalid JSON in actions (Row {excel_row_num}): {str(e)} Action: {actions}")
+        # Try parsing as JSON first
+        try:
+            return json.loads(condition_str)
+        except json.JSONDecodeError:
+            pass
 
-                       # Process conditions
-                       raw_conditions = row['conditions']
-                       try:
-                           conditions = json.loads(
-                           raw_conditions,
-                           parse_float=parse_value,
-                           parse_int=parse_value
-                           )
-                       except json.JSONDecodeError as e:
-                            raise ValueError(f"Invalid JSON in conditions (Row {excel_row_num}): {str(e)} Conditions: {conditions}")    
+        # Handle rule references
+        ref_rules = re.findall(r"refRule\(['\"]([\w-]+)['\"]\)", condition_str)
+        if ref_rules:
+            if len(ref_rules) > 1:
+                return {"or" if " or " in condition_str else "and": [
+                    {"refRule": rule} for rule in ref_rules
+                ]}
+            return {"refRule": ref_rules[0]}
 
-                       # Validate individual actions first
+        # Handle comparison operators
+        comparison_re = re.compile(
+            r"^\s*([\w\.]+)\s*(==|!=|>=|<=|>|<|in|not in)\s*(.+)$", 
+            re.IGNORECASE
+        )
+        match = comparison_re.match(condition_str)
+        if match:
+            field, operator, value_str = match.groups()
+            operator = operator.lower().replace(' ', '_')
+            return {
+                field: {
+                    "operator": operator,
+                    "value": ExcelRuleUploader.parse_value(value_str)
+                }
+            }
 
-                       if not isinstance(actions, list):
-                          raise ValueError(f"Actions must be an array in row {excel_row_num}")
-                       for action_idx, action in enumerate(actions, 1):
-                           if not isinstance(action, dict):
-                                raise ValueError(f"Action {action_idx} must be an object in row {excel_row_num}")
-                           if 'type' not in action:
-                              raise ValueError(f"Action {action_idx} missing 'type' in row {excel_row_num}")
-                           if 'parameters' not in action:
-                              raise ValueError(f"Action {action_idx} missing 'parameters' in row {excel_row_num}")
+        # Handle boolean logic (AND/OR)
+        for logic_op in [' and ', ' or ']:
+            if logic_op in condition_str:
+                parts = condition_str.split(logic_op)
+                return {
+                    logic_op.strip(): [
+                        ExcelRuleUploader.parse_dsl_condition(part.strip()) 
+                        for part in parts
+                    ]
+                }
 
-                       # Now parse conditions with numeric handling
-                       conditions = json.loads(
-                          row['conditions'],
-                          parse_float=parse_value,
-                          parse_int=parse_value
-                       )
+        raise ValueError(f"Unrecognized condition format: {condition_str}")
+        
+    async def validate_excel_structure(self, file_path: str) -> List[Dict[str, Any]]:
+        try:
+            df = pd.read_excel(file_path)
+            required_columns = ['context', 'name', 'priority', 'description', 'conditions', 'actions']
+        
+            if missing := [col for col in required_columns if col not in df.columns]:
+               raise ValueError(f"Missing columns: {', '.join(missing)}")
 
-                       rule = {
-                           'context': str(row['context']),
-                           'name': str(row['name']),
-                           'priority': int(row['priority']),
-                           'description': str(row['description']),
-                           'conditions': conditions,
-                           'actions': actions
-                       }
+            rules = []
+            for idx, row in df.iterrows():
+                excel_row_num = idx + 2
+                raw_actions = str(row['actions'])
+                raw_conditions = str(row['conditions'])
+            
+                try:
+                    # Parse using natural language processing
+                    actions = parse_actions(raw_actions)
+                    conditions = self.parse_dsl_condition(raw_conditions)
 
-                       # Validate with Pydantic
-                       RuleCreate(**rule)
-                       rules.append(rule)
+                    rule = {
+                       "context": str(row['context']),
+                       "name": str(row['name']),
+                       "priority": int(row['priority']),
+                       "description": str(row['description']),
+                       "conditions": conditions,
+                       "actions": actions
+                    }
+                
+                    # Validate with Pydantic model
+                    RuleCreate(**rule)
+                    rules.append(rule)
+                
+                except Exception as e:
+                   logger.error(f"Error in row {excel_row_num}: {str(e)}")
+                   raise ValueError(f"Row {excel_row_num}: {str(e)}") from e
 
-                    except Exception as e:
-                       logger.error(f"Error in Excel row {excel_row_num} (ID: {row.get('id', 'N/A')}): {str(e)}")
-                       raise HTTPException(400, detail=f"Row {excel_row_num}: {str(e)}")
-
-                return rules
-
+            return rules
         except Exception as e:
-                logger.error(f"Excel processing failed: {str(e)}", exc_info=True)
-                raise HTTPException(400, detail=f"File validation failed: {str(e)}")
-        finally:
-                if os.path.exists(file_path):
-                    try: os.remove(file_path)
-                    except Exception as e: logger.warning(f"Cleanup error: {str(e)}")    
-
+            logger.error("Excel processing failed", exc_info=True)
+            raise
+        
 # --------------------------
 # Pydantic Models
 # --------------------------
@@ -1737,7 +1990,7 @@ class RuleCreate(BaseModel):
 # Database Models
 # --------------------------
 class RuleModel(Base):
-    __tablename__ = "rules3456717_5"
+    __tablename__ = "rules3456717_14"
     id = Column(Integer, primary_key=True, index=True)
     context = Column(String, index=True) 
     name = Column(String, index=True)
@@ -1935,7 +2188,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
         # Check if tables exist first
         logger.info("chaecking for table existence")
-        if not await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table("rules3456717_5")):
+        if not await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table("rules3456717_14")):
             await conn.run_sync(Base.metadata.create_all)
     yield
 
@@ -1953,7 +2206,7 @@ async def lifespan(app: FastAPI):
 
 def check_and_update_columns(conn):
     # CORRECTED TABLE NAME TO MATCH MODEL
-    table_name = "rules3456717_5"
+    table_name = "rules3456717_14"
     
     inspector = inspect(conn)
     
@@ -2102,6 +2355,36 @@ async def evaluate_conditions(
     depth: int = 0
     
 ) -> bool:
+    if depth > 10:
+        raise RecursionError("Maximum condition nesting depth (10) exceeded")
+    
+    # Handle multiple refRules in logical groups
+    if 'and' in conditions:
+        return all(
+            await asyncio.gather(*[
+                evaluate_conditions(c, facts, context, all_rules, depth+1)
+                for c in conditions['and']
+            ])
+        )
+    elif 'or' in conditions:
+        return any(
+            await asyncio.gather(*[
+                evaluate_conditions(c, facts, context, all_rules, depth+1)
+                for c in conditions['or']
+            ])
+        )
+    elif 'refRule' in conditions:
+        rule_name = conditions['refRule']
+        referenced_rule = next((r for r in all_rules if r['name'] == rule_name), None)
+        if not referenced_rule:
+            raise ValueError(f"Referenced rule '{rule_name}' not found")
+        return await evaluate_conditions(
+            referenced_rule['conditions'],
+            facts,
+            context,
+            all_rules,
+            depth + 1
+        )
     if 'date_comparison' in conditions:
         return await _handle_date_comparison(conditions, facts)
     return await evaluate_condition(conditions, facts, context, all_rules, depth)
